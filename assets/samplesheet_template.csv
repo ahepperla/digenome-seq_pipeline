@@ -1,0 +1,5 @@
+sample,fastq_1,fastq_2,control,variant_vcf
+TreatedA,/path/to/TreatedA_L001_R1.fastq.gz,/path/to/TreatedA_L001_R2.fastq.gz,ControlA,/path/to/DonorA.variants.vcf.gz
+TreatedA,/path/to/TreatedA_L002_R1.fastq.gz,/path/to/TreatedA_L002_R2.fastq.gz,ControlA,/path/to/DonorA.variants.vcf.gz
+TreatedB,/path/to/TreatedB_L001_R1.fastq.gz,/path/to/TreatedB_L001_R2.fastq.gz,ControlA,/path/to/DonorA.variants.vcf.gz
+ControlA,/path/to/ControlA_L001_R1.fastq.gz,/path/to/ControlA_L001_R2.fastq.gz,,

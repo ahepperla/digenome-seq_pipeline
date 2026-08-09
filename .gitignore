@@ -1,0 +1,14 @@
+.DS_Store
+.nextflow*
+work/
+results/
+reference_cache/*
+!reference_cache/.gitkeep
+bin/__pycache__/
+tests/__pycache__/
+tests/fixtures/*.fastq.gz
+tests/fixtures/tiny_samplesheet.csv
+tests/fixtures/reference_cache/
+smoke_results/
+smoke_work/
+containers/*.sif

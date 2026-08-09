@@ -1,0 +1,21 @@
+Bootstrap: docker
+From: python@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+
+%labels
+    Author Digenome-seq pipeline maintainers
+    Description Unified Digenome and nDigenome cleavage caller runtime
+    Python 3.12.11
+    pysam 0.23.3
+
+%post
+    apt-get update
+    apt-get install -y --no-install-recommends procps
+    rm -rf /var/lib/apt/lists/*
+    python3 -m pip install --no-cache-dir pysam==0.23.3
+
+%environment
+    export PYTHONDONTWRITEBYTECODE=1
+    export PYTHONUNBUFFERED=1
+
+%runscript
+    exec python3 "$@"
