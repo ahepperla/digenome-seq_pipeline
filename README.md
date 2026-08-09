@@ -274,9 +274,9 @@ On Longleaf the default cache is:
 ```
 
 The SHA-256 is calculated from the complete FASTA. A future run reuses an
-index only when its genome name and FASTA hash match. Concurrent runs use a
-lock, so one run builds while the other waits and then reuses the completed
-index.
+index only when its genome name, FASTA hash, stable bwa-mem2 version, and
+required index files match. Concurrent runs use a lock, so one run builds
+while the other waits and then reuses the completed index.
 
 ## Outputs
 

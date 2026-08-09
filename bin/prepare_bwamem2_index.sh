@@ -74,18 +74,32 @@ manifest_value() {
     awk -F '\t' -v wanted="$key" '$1 == wanted { print $2; exit }' "$manifest"
 }
 
+parse_bwa_version() {
+    local output=$1
+    local line
+
+    while IFS= read -r line; do
+        line=${line//$'\r'/}
+        line=${line//$'\t'/ }
+        if [[ "$line" =~ ^[0-9]+([.][0-9]+)+([-+._[:alnum:]]*)?$ ]]; then
+            printf '%s\n' "$line"
+            return 0
+        fi
+    done <<< "$output"
+
+    return 1
+}
+
 fasta=$(cd "$(dirname "$fasta")" && pwd -P)/$(basename "$fasta")
 cache_dir=$(mkdir -p "$cache_dir" && cd "$cache_dir" && pwd -P)
 fasta_sha256=$(sha256_file "$fasta")
 fasta_size=$(file_size "$fasta")
 fasta_mtime=$(file_mtime "$fasta")
 bwa_version_output=$(bwa-mem2 version 2>&1)
-bwa_version=${bwa_version_output%%$'\n'*}
-bwa_version=${bwa_version//$'\t'/ }
-[[ -n "$bwa_version" ]] || {
-    echo "ERROR: bwa-mem2 version returned no output" >&2
+if ! bwa_version=$(parse_bwa_version "$bwa_version_output"); then
+    echo "ERROR: could not find a semantic version in 'bwa-mem2 version' output" >&2
     exit 1
-}
+fi
 
 genome_root="${cache_dir}/${genome}"
 fingerprint_dir="${genome_root}/${fasta_sha256}"
@@ -109,6 +123,48 @@ manifest_matches() {
     index_complete "$index_prefix"
 }
 
+migrate_legacy_manifest() {
+    [[ -s "$manifest" ]] || return 1
+    [[ "$(manifest_value "$manifest" genome)" == "$genome" ]] || return 1
+    [[ "$(manifest_value "$manifest" fasta_sha256)" == "$fasta_sha256" ]] || return 1
+    index_complete "$index_prefix" || return 1
+
+    local recorded_version
+    recorded_version=$(manifest_value "$manifest" bwa_mem2_version)
+    [[ "$recorded_version" == "Looking to launch executable"* ]] || return 1
+    [[ "$recorded_version" == *"/bwa-mem2-${bwa_version}_x64-linux/"* ]] || return 1
+
+    local original_created_utc
+    local temporary_manifest
+    original_created_utc=$(manifest_value "$manifest" created_utc)
+    temporary_manifest=$(mktemp "${manifest}.XXXXXX") || {
+        echo "ERROR: could not create a temporary index manifest" >&2
+        exit 1
+    }
+    if ! cat > "$temporary_manifest" <<EOF
+schema_version	2
+genome	${genome}
+fasta_path	${fasta}
+fasta_size	${fasta_size}
+fasta_mtime_epoch	${fasta_mtime}
+fasta_sha256	${fasta_sha256}
+bwa_mem2_version	${bwa_version}
+created_utc	${original_created_utc}
+version_metadata_migrated_utc	$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+    then
+        rm -f "$temporary_manifest"
+        echo "ERROR: could not write migrated index metadata" >&2
+        exit 1
+    fi
+    mv "$temporary_manifest" "$manifest" || {
+        rm -f "$temporary_manifest"
+        echo "ERROR: could not publish migrated index metadata: $manifest" >&2
+        exit 1
+    }
+    echo "Updated legacy bwa-mem2 version metadata: $manifest"
+}
+
 write_ready() {
     cat > "$ready_file" <<EOF
 genome	${genome}
@@ -120,6 +176,9 @@ bwa_mem2_version	${bwa_version}
 EOF
 }
 
+if [[ ! -d "$lock_dir" ]]; then
+    migrate_legacy_manifest || true
+fi
 if manifest_matches; then
     echo "Using validated bwa-mem2 index: $index_prefix"
     write_ready
@@ -187,6 +246,11 @@ if manifest_matches; then
     write_ready
     exit 0
 fi
+migrate_legacy_manifest || true
+if manifest_matches; then
+    write_ready
+    exit 0
+fi
 
 tmp_dir=$(mktemp -d "${genome_root}/.build.${fasta_sha256}.XXXXXX")
 tmp_prefix="${tmp_dir}/${genome}"
@@ -198,7 +262,7 @@ index_complete "$tmp_prefix" || {
 }
 
 cat > "${tmp_dir}/index.complete.tsv" <<EOF
-schema_version	1
+schema_version	2
 genome	${genome}
 fasta_path	${fasta}
 fasta_size	${fasta_size}

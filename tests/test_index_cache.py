@@ -25,6 +25,9 @@ class IndexCacheTests(unittest.TestCase):
             """#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == "version" ]]; then
+  simd=${FAKE_BWA_SIMD:-avx2}
+  echo "Looking to launch executable \\"/opt/bwa-mem2-2.3-test_x64-linux/bwa-mem2.${simd}\\", simd = .${simd}"
+  echo "Launching executable \\"/opt/bwa-mem2-2.3-test_x64-linux/bwa-mem2.${simd}\\""
   echo "2.3-test"
   for ((i = 0; i < 10000; i++)); do
     echo "additional version output $i"
@@ -53,10 +56,15 @@ exit 2
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def run_helper(self, stale_seconds: int = 172800) -> subprocess.CompletedProcess[str]:
+    def run_helper(
+        self,
+        stale_seconds: int = 172800,
+        simd: str = "avx2",
+    ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["PATH"] = f"{self.bin_dir}:{environment['PATH']}"
         environment["FAKE_BWA_COUNT"] = str(self.count_file)
+        environment["FAKE_BWA_SIMD"] = simd
         return subprocess.run(
             [
                 str(INDEX_HELPER),
@@ -96,6 +104,40 @@ exit 2
         self.assertEqual(self.ready_values()["bwa_mem2_version"], "2.3-test")
         for suffix in SUFFIXES:
             self.assertTrue(Path(prefix + suffix).stat().st_size > 0)
+
+    def test_cpu_dispatch_message_does_not_invalidate_index(self) -> None:
+        first = self.run_helper(simd="avx2")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.run_helper(simd="avx512")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.count_file.read_text().strip(), "1")
+        self.assertEqual(self.ready_values()["bwa_mem2_version"], "2.3-test")
+
+    def test_legacy_dispatch_manifest_is_migrated_without_rebuild(self) -> None:
+        first = self.run_helper(simd="avx2")
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        prefix = Path(self.ready_values()["index_prefix"])
+        manifest = prefix.parent / "index.complete.tsv"
+        manifest_text = manifest.read_text()
+        manifest.write_text(
+            manifest_text.replace(
+                "schema_version\t2",
+                "schema_version\t1",
+            ).replace(
+                "bwa_mem2_version\t2.3-test",
+                "bwa_mem2_version\tLooking to launch executable "
+                '"/opt/bwa-mem2-2.3-test_x64-linux/bwa-mem2.avx2", '
+                "simd = .avx2",
+            )
+        )
+
+        second = self.run_helper(simd="avx512")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.count_file.read_text().strip(), "1")
+        self.assertIn("schema_version\t2", manifest.read_text())
+        self.assertIn("bwa_mem2_version\t2.3-test", manifest.read_text())
+        self.assertIn("version_metadata_migrated_utc\t", manifest.read_text())
 
     def test_changed_fasta_gets_a_new_content_addressed_index(self) -> None:
         self.assertEqual(self.run_helper().returncode, 0)
