@@ -65,5 +65,29 @@ sha256sum -c checksums.sha256
 
 ## Provenance
 
-`sources.tsv` records immutable base-image digests. `checksums.sha256` records
-complete SIF checksums.
+`sources.tsv` records, for every SIF:
+
+- the human-readable source tag
+- the immutable multi-architecture OCI index digest
+- the selected `linux/amd64` image-manifest digest
+- whether the SIF was converted directly or built from a definition file
+- the build architecture, Apptainer version, and UTC build time embedded in
+  the SIF
+- the UTC time when the tag and digest were last checked against Docker Hub
+
+The source tags are readable aliases and may change upstream. The recorded OCI
+digests are the immutable source identities. `checksums.sha256` separately
+records the complete checksum of each built SIF.
+
+The values in `sources.tsv` were checked against the metadata embedded in the
+four SIFs and against Docker Hub on August 9, 2026. For publication or external
+peer review, archive the exact SIF files in a persistent repository and cite
+that accession or DOI. The shared Longleaf paths alone are not accessible to
+outside reviewers.
+
+The current cleavage SIF contains `pysam==0.23.3` and Debian `procps` version
+`2:4.0.2-3`. Its definition pins the Python base-image digest and the pysam
+version, but the original build did not pin a Debian repository snapshot or
+the pysam wheel hash. The archived SIF checksum therefore identifies the exact
+reviewed artifact; a later rebuild should be functionally equivalent but is
+not guaranteed to have the same SIF checksum.

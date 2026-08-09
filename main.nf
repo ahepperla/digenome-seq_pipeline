@@ -104,17 +104,23 @@ def bundled_checksums = file("${baseDir}/containers/checksums.sha256").text
         def fields = line.trim().split(/\s+/, 2)
         [(fields[1]): fields[0]]
     }
-def container_sources = file("${baseDir}/containers/sources.tsv").text
+def source_manifest_lines = file("${baseDir}/containers/sources.tsv").text
     .readLines()
-    .drop(1)
     .findAll { it.trim() }
+def source_manifest_header = source_manifest_lines.first().split('\t', -1)
+def container_sources = source_manifest_lines
+    .drop(1)
     .collectEntries { line ->
-        def fields = line.split('\t', 3)
-        [(fields[0]): [source: fields[1], digest: fields[2]]]
+        def fields = line.split('\t', -1)
+        def provenance = [:]
+        source_manifest_header.drop(1).eachWithIndex { field_name, index ->
+            provenance[field_name] = fields[index + 1]
+        }
+        [(fields[0]): provenance]
     }
 
 def run_info = [
-    schema_version: 5,
+    schema_version: 6,
     analysis: selected_analysis,
     requested_genome: requested_genome,
     resolved_genome: selected_genome,

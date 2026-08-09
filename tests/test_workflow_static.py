@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 from collections import Counter
+import re
 import unittest
 from pathlib import Path
 
@@ -129,6 +131,65 @@ class WorkflowStaticTests(unittest.TestCase):
         self.assertIn("python@sha256:", from_line)
         self.assertNotIn("-bookworm@sha256:", from_line)
         self.assertIn("apt-get install -y --no-install-recommends procps", definition)
+
+    def test_container_provenance_manifest_is_complete(self) -> None:
+        manifest_path = ROOT / "containers" / "sources.tsv"
+        with manifest_path.open(newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+
+        expected_fields = [
+            "artifact",
+            "source_tag",
+            "oci_index_digest",
+            "linux_amd64_manifest_digest",
+            "construction",
+            "sif_build_arch",
+            "apptainer_version",
+            "sif_build_time_utc",
+            "registry_verified_utc",
+        ]
+        self.assertEqual(list(rows[0]), expected_fields)
+        self.assertEqual(len(rows), 4)
+
+        checksum_artifacts = {
+            line.split()[1]
+            for line in (
+                ROOT / "containers" / "checksums.sha256"
+            ).read_text().splitlines()
+            if line.strip()
+        }
+        manifest_artifacts = {row["artifact"] for row in rows}
+        self.assertEqual(manifest_artifacts, checksum_artifacts)
+
+        digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+        timestamp_pattern = re.compile(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
+        )
+        for row in rows:
+            self.assertTrue(row["source_tag"].startswith("docker.io/"))
+            self.assertRegex(row["oci_index_digest"], digest_pattern)
+            self.assertRegex(
+                row["linux_amd64_manifest_digest"],
+                digest_pattern,
+            )
+            self.assertEqual(row["sif_build_arch"], "amd64")
+            self.assertEqual(row["apptainer_version"], "1.5.0-1.el8")
+            self.assertRegex(row["sif_build_time_utc"], timestamp_pattern)
+            self.assertRegex(row["registry_verified_utc"], timestamp_pattern)
+
+        cleavage_row = next(
+            row
+            for row in rows
+            if row["artifact"] == "cleavage_pysam_v0.23.3.sif"
+        )
+        definition = (
+            ROOT / "containers" / "cleavage_pysam_v0.23.3.def"
+        ).read_text()
+        self.assertIn(cleavage_row["oci_index_digest"], definition)
+        self.assertEqual(
+            cleavage_row["construction"],
+            "definition_file:cleavage_pysam_v0.23.3.def",
+        )
 
     def test_legacy_digenome_runtime_is_removed(self) -> None:
         sources = (ROOT / "containers" / "sources.tsv").read_text()

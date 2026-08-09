@@ -1,5 +1,5 @@
-artifact	source	immutable_digest
-fastp_v1.3.3.sif	docker.io/staphb/fastp:1.3.3	sha256:9d08d953996b16ad1275a163c8135f4739a9a62cfee2b963f49eefe333bdfe0f
-bwa-mem2_v2.3_samtools_v1.22.sif	docker.io/hmartiniano/bwa-mem2-samtools:2.3_1.22-1	sha256:f549b194c53c85ba4cced3555132e2f3ae79d5e40c74e8b576c2bc09fcfe9648
-multiqc_v1.35.sif	docker.io/multiqc/multiqc:v1.35	sha256:976be2094a3bc1dab7315ad03440d43aab09bf7756f84f3a92ef7ae1013e4bfd
-cleavage_pysam_v0.23.3.sif	docker.io/library/python:3.12.11-slim-bookworm	sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+artifact	source_tag	oci_index_digest	linux_amd64_manifest_digest	construction	sif_build_arch	apptainer_version	sif_build_time_utc	registry_verified_utc
+fastp_v1.3.3.sif	docker.io/staphb/fastp:1.3.3	sha256:9d08d953996b16ad1275a163c8135f4739a9a62cfee2b963f49eefe333bdfe0f	sha256:0a727396bbebf15e5567ff2e52a27bd7d18ff38a095574a6926fa45d084708ce	direct_oci_conversion	amd64	1.5.0-1.el8	2026-06-03T01:14:46Z	2026-08-09T01:11:11Z
+bwa-mem2_v2.3_samtools_v1.22.sif	docker.io/hmartiniano/bwa-mem2-samtools:2.3_1.22-1	sha256:f549b194c53c85ba4cced3555132e2f3ae79d5e40c74e8b576c2bc09fcfe9648	sha256:0b48ef2c7bfadfb090712bd67278c257f661bf79976bdbdd08a2374c664152a1	direct_oci_conversion	amd64	1.5.0-1.el8	2026-06-03T01:34:07Z	2026-08-09T01:11:11Z
+multiqc_v1.35.sif	docker.io/multiqc/multiqc:v1.35	sha256:976be2094a3bc1dab7315ad03440d43aab09bf7756f84f3a92ef7ae1013e4bfd	sha256:a0c146fb9ec0207a88627da3aaa36c10014c5ef8dc841c55a01c0345d8b5cae5	direct_oci_conversion	amd64	1.5.0-1.el8	2026-06-03T01:37:19Z	2026-08-09T01:11:11Z
+cleavage_pysam_v0.23.3.sif	docker.io/library/python:3.12.11-slim-bookworm	sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7	sha256:c00fc7b44d844b6da22861ec24af43968a5200eac4ec607b4725d585165d6b49	definition_file:cleavage_pysam_v0.23.3.def	amd64	1.5.0-1.el8	2026-08-08T01:38:44Z	2026-08-09T01:11:11Z
