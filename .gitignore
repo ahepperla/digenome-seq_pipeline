@@ -12,4 +12,3 @@ tests/fixtures/reference_cache/
 smoke_results/
 smoke_work/
 containers/*.sif
-containers/*.sif

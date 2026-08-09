@@ -3,7 +3,20 @@
 The pipeline uses Nextflow's Apptainer integration. Process scripts do not
 launch nested container runtimes.
 
-## Bundled images
+## Image location
+
+SIF files are excluded from Git because of their size. The shared Longleaf
+installation stores the validated images in:
+
+```text
+/proj/jmsimon/Zylka/digenome-seq_pipeline/containers
+```
+
+Nextflow expects the files below in the `containers/` directory of whichever
+pipeline checkout is being run. A separate checkout must have these images
+copied or provisioned there before running the pipeline.
+
+## Required images
 
 | File | Purpose |
 | --- | --- |

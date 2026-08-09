@@ -25,6 +25,18 @@ The `longleaf` profile expects:
 The containers provide Python, pysam, bwa-mem2, samtools, fastp, and MultiQC.
 No Python module or virtual environment is required.
 
+The GitHub repository does not include the large SIF files. The shared
+Longleaf installation keeps the validated images here:
+
+```text
+/proj/jmsimon/Zylka/digenome-seq_pipeline/containers
+```
+
+The pipeline looks for images in the `containers/` directory of the checkout
+being run. Therefore, runs using the shared Longleaf checkout find these
+images automatically. A separate checkout must have the same SIF files copied
+or provisioned in its own `containers/` directory.
+
 Verify the required commands and the default GRCh38 reference:
 
 ```bash
@@ -32,7 +44,7 @@ command -v nextflow java apptainer
 test -r /proj/seq/data/GRCh38_GENCODE/GRCh38.primary_assembly.genome.fa
 ```
 
-Verify the bundled containers:
+Verify the shared Longleaf containers:
 
 ```bash
 cd /proj/jmsimon/Zylka/digenome-seq_pipeline/containers
