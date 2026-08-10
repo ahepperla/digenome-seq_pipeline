@@ -26,9 +26,10 @@ class IndexCacheTests(unittest.TestCase):
 set -euo pipefail
 if [[ "$1" == "version" ]]; then
   simd=${FAKE_BWA_SIMD:-avx2}
-  echo "Looking to launch executable \\"/opt/bwa-mem2-2.3-test_x64-linux/bwa-mem2.${simd}\\", simd = .${simd}"
-  echo "Launching executable \\"/opt/bwa-mem2-2.3-test_x64-linux/bwa-mem2.${simd}\\""
-  echo "2.3-test"
+  version=${FAKE_BWA_VERSION:-2.3-test}
+  echo "Looking to launch executable \\"/opt/bwa-mem2-${version}_x64-linux/bwa-mem2.${simd}\\", simd = .${simd}"
+  echo "Launching executable \\"/opt/bwa-mem2-${version}_x64-linux/bwa-mem2.${simd}\\""
+  echo "${version}"
   for ((i = 0; i < 10000; i++)); do
     echo "additional version output $i"
   done
@@ -60,11 +61,13 @@ exit 2
         self,
         stale_seconds: int = 172800,
         simd: str = "avx2",
+        version: str = "2.3-test",
     ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["PATH"] = f"{self.bin_dir}:{environment['PATH']}"
         environment["FAKE_BWA_COUNT"] = str(self.count_file)
         environment["FAKE_BWA_SIMD"] = simd
+        environment["FAKE_BWA_VERSION"] = version
         return subprocess.run(
             [
                 str(INDEX_HELPER),
@@ -97,9 +100,11 @@ exit 2
     def test_complete_index_is_reused(self) -> None:
         first = self.run_helper()
         self.assertEqual(first.returncode, 0, first.stderr)
+        first_ready_mtime = self.ready.stat().st_mtime_ns
         second = self.run_helper()
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(self.count_file.read_text().strip(), "1")
+        self.assertEqual(self.ready.stat().st_mtime_ns, first_ready_mtime)
         prefix = self.ready_values()["index_prefix"]
         self.assertEqual(self.ready_values()["bwa_mem2_version"], "2.3-test")
         for suffix in SUFFIXES:
@@ -148,6 +153,53 @@ exit 2
         self.assertNotEqual(first_prefix, second_prefix)
         self.assertEqual(self.count_file.read_text().strip(), "2")
 
+    def test_bwa_versions_use_isolated_cache_directories(self) -> None:
+        self.assertEqual(self.run_helper(version="2.3-test").returncode, 0)
+        first_prefix = self.ready_values()["index_prefix"]
+        self.assertEqual(self.run_helper(version="2.4-test").returncode, 0)
+        second_prefix = self.ready_values()["index_prefix"]
+
+        self.assertNotEqual(first_prefix, second_prefix)
+        self.assertIn("/2.3-test/bwamem2/", first_prefix)
+        self.assertIn("/2.4-test/bwamem2/", second_prefix)
+        self.assertEqual(self.count_file.read_text().strip(), "2")
+        for prefix in (first_prefix, second_prefix):
+            self.assertTrue(
+                all(Path(prefix + suffix).is_file() for suffix in SUFFIXES)
+            )
+
+        self.assertEqual(self.run_helper(version="2.3-test").returncode, 0)
+        self.assertEqual(self.ready_values()["index_prefix"], first_prefix)
+        self.assertEqual(self.count_file.read_text().strip(), "2")
+
+    def test_unversioned_cache_is_migrated_without_rebuild(self) -> None:
+        first = self.run_helper()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        versioned_prefix = Path(self.ready_values()["index_prefix"])
+        versioned_directory = versioned_prefix.parent
+        fingerprint_directory = versioned_directory.parent.parent
+        legacy_directory = fingerprint_directory / "bwamem2"
+        versioned_directory.rename(legacy_directory)
+        versioned_directory.parent.rmdir()
+
+        second = self.run_helper()
+
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn(
+            "Migrated unversioned bwa-mem2 index cache",
+            second.stdout,
+        )
+        migrated_prefix = Path(self.ready_values()["index_prefix"])
+        self.assertEqual(
+            migrated_prefix,
+            fingerprint_directory / "2.3-test" / "bwamem2" / "tiny",
+        )
+        self.assertEqual(self.count_file.read_text().strip(), "1")
+        self.assertEqual(
+            (legacy_directory / "tiny.0123").stat().st_ino,
+            Path(f"{migrated_prefix}.0123").stat().st_ino,
+        )
+
     def test_partial_index_is_quarantined_and_rebuilt(self) -> None:
         self.assertEqual(self.run_helper().returncode, 0)
         prefix = self.ready_values()["index_prefix"]
@@ -160,7 +212,7 @@ exit 2
 
     def test_stale_local_dead_pid_lock_is_recovered(self) -> None:
         digest = hashlib.sha256(self.fasta.read_bytes()).hexdigest()
-        lock = self.cache / "tiny" / f".{digest}.build.lock"
+        lock = self.cache / "tiny" / f".{digest}.2.3-test.build.lock"
         lock.mkdir(parents=True)
         (lock / "owner.tsv").write_text(
             f"hostname\t{os.uname().nodename}\n"

@@ -299,7 +299,7 @@ The source FASTA remains at the path configured in `nextflow.config`.
 bwa-mem2 indexes are stored under:
 
 ```text
-<ref_cache>/<genome>/<fasta_sha256>/bwamem2/
+<ref_cache>/<genome>/<fasta_sha256>/<bwa_mem2_version>/bwamem2/
 ```
 
 By default the cache is relative to the checkout being run:

@@ -634,6 +634,110 @@ class CleavageChunkTests(unittest.TestCase):
             self.assertEqual(len(keys), len(set(keys)))
             self.assertGreater(len(keys), 0)
 
+    def test_digenome_conflict_chain_expands_beyond_fixed_padding(
+        self,
+    ) -> None:
+        positions = list(range(980, 1021, 2))
+        reads = []
+        for position in positions:
+            reads.extend(
+                self.make_read(
+                    f"chain_forward_{position}_{index}",
+                    0,
+                    position,
+                    mapq=0,
+                )
+                for index in range(5)
+            )
+            reads.extend(
+                self.make_read(
+                    f"chain_reverse_{position}_{index}",
+                    0,
+                    position - 49,
+                    reverse=True,
+                    mapq=0,
+                )
+                for index in range(5)
+            )
+        treated = self.write_bam("conflict_chain", reads)
+        vcf = self.write_variant_vcf()
+
+        interval_files = []
+        for chunk_id, owner_start, owner_end, scan_start, scan_end in (
+            ("chunk_000", 0, 1000, 0, 1006),
+            ("chunk_001", 1000, 2000, 994, 2000),
+        ):
+            interval_file = self.tmp / f"{chunk_id}.intervals.tsv"
+            interval_file.write_text(
+                "contig\towner_start\towner_end\tscan_start\tscan_end\n"
+                f"chr1\t{owner_start}\t{owner_end}\t"
+                f"{scan_start}\t{scan_end}\n"
+            )
+            interval_files.append(interval_file)
+
+        serial_prefix = self.tmp / "chain_serial"
+        serial_args = self.caller_args(
+            treated,
+            Path(""),
+            vcf,
+            serial_prefix,
+            "digenome",
+        )
+        serial_args.control_bam = ""
+        serial_args.control_sample = ""
+        serial_args.digenome_overhang = 0
+        serial_args.digenome_pair_window = 2
+        serial_qc = cleavage.run_serial_calling(serial_args)
+
+        raw_fragments = []
+        summaries = []
+        chunked_prefix = self.tmp / "chain_chunked"
+        for interval_file in interval_files:
+            chunk_id = interval_file.name.removesuffix(".intervals.tsv")
+            raw_path = self.tmp / f"{chunk_id}.chain.raw.jsonl.gz"
+            summary_path = self.tmp / f"{chunk_id}.chain.chunk.json"
+            args = self.caller_args(
+                treated,
+                Path(""),
+                vcf,
+                chunked_prefix,
+                "digenome",
+            )
+            args.control_bam = ""
+            args.control_sample = ""
+            args.digenome_overhang = 0
+            args.digenome_pair_window = 2
+            args.intervals_file = str(interval_file)
+            args.chunk_id = chunk_id
+            args.raw_output = str(raw_path)
+            args.summary_output = str(summary_path)
+            cleavage.run_chunk_calling(args)
+            raw_fragments.append(str(raw_path))
+            summaries.append(str(summary_path))
+
+        chunked_qc = finalizer.finalize_chunks(
+            argparse.Namespace(
+                sample="Sample",
+                analysis="digenome",
+                output_prefix=str(chunked_prefix),
+                raw_fragment=raw_fragments,
+                chunk_summary=summaries,
+            )
+        )
+
+        self.assertEqual(
+            Path(f"{serial_prefix}.digenome.all.tsv").read_bytes(),
+            Path(f"{chunked_prefix}.digenome.all.tsv").read_bytes(),
+        )
+        self.assertEqual(
+            serial_qc["candidate_endpoints_or_pairs_before_filters"],
+            chunked_qc["candidate_endpoints_or_pairs_before_filters"],
+        )
+        self.assertGreater(
+            serial_qc["candidate_endpoints_or_pairs_before_filters"],
+            len(positions),
+        )
+
     def test_serial_and_chunked_outputs_are_equivalent(self) -> None:
         treated_reads = self.endpoint_site_reads(0, 500, 8, "chr1")
         treated_reads += self.endpoint_site_reads(1, 700, 6, "chr2")

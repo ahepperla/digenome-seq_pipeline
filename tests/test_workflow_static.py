@@ -154,6 +154,32 @@ class WorkflowStaticTests(unittest.TestCase):
         self.assertIn("bwa-mem2_v2.3_samtools_v1.22.sif", config)
         self.assertNotIn("bwa-mem2_v2.2.1", config)
 
+    def test_alignment_retains_index_ready_dependency(self) -> None:
+        main = (ROOT / "main.nf").read_text()
+        pe_block = main.split(
+            "process ALIGN_MARKDUP_PE", 1
+        )[1].split("process ALIGN_MARKDUP_SE", 1)[0]
+        se_block = main.split(
+            "process ALIGN_MARKDUP_SE", 1
+        )[1].split("process PLAN_CLEAVAGE_CHUNKS", 1)[0]
+
+        self.assertIn("path(index_ready)", pe_block)
+        self.assertIn("path(index_ready)", se_block)
+        self.assertIn("test -s ${shellQuote(index_ready)}", pe_block)
+        self.assertIn("test -s ${shellQuote(index_ready)}", se_block)
+        self.assertIn(
+            "tuple(values.index_prefix as String, ready)",
+            main,
+        )
+        self.assertIn(
+            "meta, read1, read2, index_prefix, index_ready ->",
+            main,
+        )
+        self.assertIn(
+            "meta, read1, index_prefix, index_ready ->",
+            main,
+        )
+
     def test_alignment_thread_budget_does_not_oversubscribe_pipe(self) -> None:
         main = (ROOT / "main.nf").read_text()
         self.assertIn(

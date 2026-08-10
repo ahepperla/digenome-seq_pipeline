@@ -108,6 +108,32 @@ class PreflightTests(unittest.TestCase):
         ):
             validate_preflight(self.document, self.schema)
 
+    def test_existing_read_only_output_directory_is_rejected(self) -> None:
+        output = Path(self.document["paths"]["outdir"])
+        output.mkdir()
+        output.chmod(0o555)
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "Output directory is not writable",
+            ):
+                validate_preflight(self.document, self.schema)
+        finally:
+            output.chmod(0o755)
+
+    def test_existing_read_only_reference_cache_is_rejected(self) -> None:
+        cache = Path(self.document["paths"]["ref_cache"])
+        cache.mkdir()
+        cache.chmod(0o555)
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "Reference cache is not writable",
+            ):
+                validate_preflight(self.document, self.schema)
+        finally:
+            cache.chmod(0o755)
+
 
 if __name__ == "__main__":
     unittest.main()

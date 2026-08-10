@@ -422,6 +422,27 @@ class NDigenomeTests(unittest.TestCase):
         self.assertIn("NEARBY_INDEL", row["filter_reasons"])
         self.assertIn("KNOWN_INDEL", row["filter_reasons"])
 
+    def test_deletion_ending_at_window_start_is_not_nearby(self) -> None:
+        read = self.make_read(
+            "adjacent_deletion",
+            280,
+            [(0, 5), (2, 5), (0, 30)],
+        )
+        bam_path = self.write_bam("adjacent_deletion", [read])
+
+        with pysam.AlignmentFile(bam_path, "rb") as bam:
+            metrics = cleavage.measure_site_metrics(
+                bam,
+                "chr1",
+                300,
+                "+",
+                artifact_window=10,
+                min_mapq=1,
+            )
+
+        self.assertEqual(metrics["indel_read_count"], 0)
+        self.assertIsNone(metrics["indel_position"])
+
     def test_direct_caller_rejects_an_unindexed_vcf(self) -> None:
         reads = [
             self.make_read(f"signal_{index}", 350) for index in range(8)
@@ -718,6 +739,37 @@ class NDigenomeTests(unittest.TestCase):
                 for candidate in selected
             ],
             [(100, 101), (101, 100)],
+        )
+
+    def test_digenome_pairing_handles_exact_float_costs(self) -> None:
+        metrics = cleavage.empty_metrics()
+        candidates = [
+            cleavage.DigenomePairCandidate(
+                "chr1", 1065, 1066, metrics, metrics,
+                0.2599142252422858, [],
+            ),
+            cleavage.DigenomePairCandidate(
+                "chr1", 1067, 1066, metrics, metrics,
+                0.49406008082185116, [],
+            ),
+            cleavage.DigenomePairCandidate(
+                "chr1", 1067, 1068, metrics, metrics,
+                2.863272311212815, [],
+            ),
+            cleavage.DigenomePairCandidate(
+                "chr1", 1067, 1069, metrics, metrics,
+                2.863272311212815, [],
+            ),
+        ]
+
+        selected = cleavage.select_digenome_pairs(candidates)
+
+        self.assertEqual(
+            [
+                (candidate.forward_position, candidate.reverse_position)
+                for candidate in selected
+            ],
+            [(1065, 1066), (1067, 1068)],
         )
 
     def test_digenome_control_evidence_can_filter_a_pair(self) -> None:

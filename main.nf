@@ -470,7 +470,11 @@ process ALIGN_MARKDUP_PE {
     publishDir "${params.outdir}/qc", mode: 'copy', pattern: "*.txt", overwrite: true, failOnError: true
 
     input:
-    tuple val(meta), path(read1), path(read2), val(index_prefix)
+    tuple val(meta),
+        path(read1),
+        path(read2),
+        val(index_prefix),
+        path(index_ready)
 
     output:
     tuple val(meta),
@@ -493,6 +497,7 @@ process ALIGN_MARKDUP_PE {
     )
     int samtools_threads = Math.max(0, total_cpus - 1)
     """
+    test -s ${shellQuote(index_ready)}
     RG='@RG\\tID:${meta.sample}\\tSM:${meta.sample}\\tPL:ILLUMINA\\tLB:${meta.sample}'
 
     bwa-mem2 mem \
@@ -532,7 +537,7 @@ process ALIGN_MARKDUP_SE {
     publishDir "${params.outdir}/qc", mode: 'copy', pattern: "*.txt", overwrite: true, failOnError: true
 
     input:
-    tuple val(meta), path(read1), val(index_prefix)
+    tuple val(meta), path(read1), val(index_prefix), path(index_ready)
 
     output:
     tuple val(meta),
@@ -555,6 +560,7 @@ process ALIGN_MARKDUP_SE {
     )
     int samtools_threads = Math.max(0, total_cpus - 1)
     """
+    test -s ${shellQuote(index_ready)}
     RG='@RG\\tID:${meta.sample}\\tSM:${meta.sample}\\tPL:ILLUMINA\\tLB:${meta.sample}'
 
     bwa-mem2 mem \
@@ -843,7 +849,7 @@ workflow {
                     def fields = line.split('\t', 2)
                     [(fields[0]): fields[1]]
                 }
-            values.index_prefix as String
+            tuple(values.index_prefix as String, ready)
     }
 
     CONCAT_PE_FASTQS(pe_grouped_ch)
@@ -854,15 +860,21 @@ workflow {
     pe_align_ch = FASTP_PE.out.reads
         .combine(resolved_index_ch)
         .map {
-            meta, read1, read2, index_prefix ->
-                tuple(meta, read1, read2, index_prefix)
+            meta, read1, read2, index_prefix, index_ready ->
+                tuple(
+                    meta,
+                    read1,
+                    read2,
+                    index_prefix,
+                    index_ready
+                )
         }
 
     se_align_ch = FASTP_SE.out.reads
         .combine(resolved_index_ch)
         .map {
-            meta, read1, index_prefix ->
-                tuple(meta, read1, index_prefix)
+            meta, read1, index_prefix, index_ready ->
+                tuple(meta, read1, index_prefix, index_ready)
         }
 
     ALIGN_MARKDUP_PE(pe_align_ch)

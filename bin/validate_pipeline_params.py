@@ -144,25 +144,26 @@ def _nearest_existing_parent(path: Path) -> Path:
 
 def _require_creatable_path(label: str, value: str) -> list[str]:
     path = Path(value)
-    warnings: list[str] = []
     if path.exists():
         if not path.is_dir():
             raise ValueError(f"{label} is not a directory: {value}")
-        if not os.access(path, os.R_OK):
+        if not os.access(path, os.R_OK | os.X_OK):
             raise ValueError(f"{label} is not readable: {value}")
-        if not os.access(path, os.W_OK):
-            warnings.append(
-                f"{label} is read-only; existing content can be reused but "
-                "new files cannot be created"
+        if not os.access(path, os.W_OK | os.X_OK):
+            raise ValueError(
+                f"{label} is not writable: {value}"
             )
-        return warnings
+        return []
     parent = _nearest_existing_parent(path.parent)
-    if not parent.is_dir() or not os.access(parent, os.W_OK):
+    if not parent.is_dir() or not os.access(
+        parent,
+        os.W_OK | os.X_OK,
+    ):
         raise ValueError(
             f"{label} cannot be created because its nearest existing parent "
             f"is not writable: {parent}"
         )
-    return warnings
+    return []
 
 
 def _validate_genome_aliases(genomes: dict[str, Any]) -> None:

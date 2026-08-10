@@ -357,7 +357,12 @@ def measure_site_metrics(
         for event in cigar_indel_events(read):
             event_position, kind, length = event
             event_end = event_position + (length if kind == "DEL" else 0)
-            if event_position <= end - 1 and event_end >= start:
+            overlaps_window = (
+                event_position < end and event_end > start
+                if kind == "DEL"
+                else start <= event_position < end
+            )
+            if overlaps_window:
                 indel_events[event] += 1
                 read_has_indel = True
         if read_has_indel:
@@ -632,14 +637,12 @@ class MatchingEdge:
     destination: int
     reverse_edge_index: int
     capacity: int
-    cost: tuple[int, int, float, int]
+    cost: tuple[int, int, int, int]
 
 
-def select_digenome_pairs(
+def group_digenome_pair_components(
     candidates: list[DigenomePairCandidate],
-) -> list[DigenomePairCandidate]:
-    """Choose a deterministic maximum-quality one-to-one endpoint matching."""
-    selected: list[DigenomePairCandidate] = []
+) -> list[list[DigenomePairCandidate]]:
     candidates_by_contig: dict[str, list[DigenomePairCandidate]] = {}
     for candidate in candidates:
         candidates_by_contig.setdefault(candidate.contig, []).append(candidate)
@@ -691,6 +694,15 @@ def select_digenome_pairs(
                     for index in sorted(component_indexes)
                 ]
             )
+    return independent_components
+
+
+def select_digenome_pairs(
+    candidates: list[DigenomePairCandidate],
+) -> list[DigenomePairCandidate]:
+    """Choose a deterministic maximum-quality one-to-one endpoint matching."""
+    selected: list[DigenomePairCandidate] = []
+    independent_components = group_digenome_pair_components(candidates)
 
     for contig_candidates in independent_components:
         forward_positions = sorted(
@@ -711,7 +723,7 @@ def select_digenome_pairs(
         def add_edge(
             start: int,
             destination: int,
-            cost: tuple[int, int, float, int],
+            cost: tuple[int, int, int, int],
         ) -> MatchingEdge:
             forward_edge = MatchingEdge(
                 destination=destination,
@@ -729,7 +741,7 @@ def select_digenome_pairs(
             graph[destination].append(reverse_edge)
             return forward_edge
 
-        zero_cost = (0, 0, 0.0, 0)
+        zero_cost = (0, 0, 0, 0)
         forward_nodes = {
             position: first_forward + index
             for index, position in enumerate(forward_positions)
@@ -746,11 +758,26 @@ def select_digenome_pairs(
         candidate_edges: list[
             tuple[MatchingEdge, DigenomePairCandidate]
         ] = []
-        for coordinate_rank, candidate in enumerate(contig_candidates):
+        score_ratios = [
+            float(candidate.score).as_integer_ratio()
+            for candidate in contig_candidates
+        ]
+        # Binary-float denominators are powers of two, so the largest is
+        # also their least common multiple.
+        common_score_denominator = max(
+            denominator for _numerator, denominator in score_ratios
+        )
+        for coordinate_rank, (candidate, score_ratio) in enumerate(
+            zip(contig_candidates, score_ratios)
+        ):
+            score_numerator, score_denominator = score_ratio
+            score_units = score_numerator * (
+                common_score_denominator // score_denominator
+            )
             reward_cost = (
                 -int(candidate.passes_caller_thresholds),
                 -1,
-                -candidate.score,
+                -score_units,
                 coordinate_rank,
             )
             edge = add_edge(
@@ -761,7 +788,7 @@ def select_digenome_pairs(
             candidate_edges.append((edge, candidate))
 
         while True:
-            distances: list[tuple[int, int, float, int] | None] = [
+            distances: list[tuple[int, int, int, int] | None] = [
                 None
             ] * len(graph)
             previous: list[tuple[int, int] | None] = [None] * len(graph)
@@ -799,7 +826,13 @@ def select_digenome_pairs(
                 break
 
             node = sink
+            path_nodes: set[int] = set()
             while node != source:
+                if node in path_nodes:
+                    raise RuntimeError(
+                        "Internal Digenome matching path contains a cycle"
+                    )
+                path_nodes.add(node)
                 previous_step = previous[node]
                 if previous_step is None:
                     raise RuntimeError(
@@ -1077,20 +1110,6 @@ def call_digenome(
         args.digenome_forward_cutoff + 1,
         args.digenome_reverse_cutoff + 1,
     )
-    scanned = scan_candidate_endpoints(
-        bam,
-        scan_minimum,
-        args.digenome_min_mapq,
-        contigs,
-        selected_intervals,
-        genome_blacklist,
-    )
-    by_contig: dict[str, dict[str, list[tuple[int, int]]]] = {}
-    for contig, position, strand, count in scanned:
-        by_contig.setdefault(contig, {"+": [], "-": []})[strand].append(
-            (position, count)
-        )
-
     site_metric_cache: dict[tuple[str, int, str], dict[str, Any]] = {}
 
     def get_site_metrics(
@@ -1110,80 +1129,242 @@ def call_digenome(
             )
         return site_metric_cache[key]
 
-    pair_candidates: list[DigenomePairCandidate] = []
-    for contig, strands in by_contig.items():
-        reverse = strands["-"]
-        reverse_positions = [position for position, _count in reverse]
-        for forward_position, _forward_scanned_count in strands["+"]:
-            expected_reverse = forward_position - args.digenome_overhang
-            lower = expected_reverse - args.digenome_pair_window
-            upper = expected_reverse + args.digenome_pair_window
-            start = bisect.bisect_left(reverse_positions, lower)
-            end = bisect.bisect_right(reverse_positions, upper)
-            for reverse_position, _reverse_scanned_count in reverse[start:end]:
-                forward_metrics = get_site_metrics(
-                    contig,
-                    forward_position,
-                    "+",
+    def build_pair_candidates(
+        selected_contigs: Iterable[str] | None = None,
+        scan_intervals: Iterable[GenomicInterval] | None = None,
+    ) -> list[DigenomePairCandidate]:
+        scanned = scan_candidate_endpoints(
+            bam,
+            scan_minimum,
+            args.digenome_min_mapq,
+            selected_contigs,
+            scan_intervals,
+            genome_blacklist,
+        )
+        by_contig: dict[str, dict[str, list[tuple[int, int]]]] = {}
+        for contig, position, strand, count in scanned:
+            by_contig.setdefault(
+                contig,
+                {"+": [], "-": []},
+            )[strand].append((position, count))
+
+        pair_candidates: list[DigenomePairCandidate] = []
+        for contig, strands in by_contig.items():
+            reverse = strands["-"]
+            reverse_positions = [position for position, _count in reverse]
+            for forward_position, _forward_count in strands["+"]:
+                expected_reverse = (
+                    forward_position - args.digenome_overhang
                 )
-                reverse_metrics = get_site_metrics(
-                    contig,
-                    reverse_position,
-                    "-",
-                )
-                score = digenome_score(
-                    forward_metrics["endpoint_count"],
-                    forward_metrics["endpoint_fraction"],
-                    reverse_metrics["endpoint_count"],
-                    reverse_metrics["endpoint_fraction"],
-                )
-                caller_reasons: list[str] = []
-                if (
-                    forward_metrics["endpoint_count"]
-                    <= args.digenome_forward_cutoff
-                ):
-                    caller_reasons.append("LOW_FORWARD_COUNT")
-                if (
-                    reverse_metrics["endpoint_count"]
-                    <= args.digenome_reverse_cutoff
-                ):
-                    caller_reasons.append("LOW_REVERSE_COUNT")
-                if (
-                    forward_metrics["strand_depth"]
-                    <= args.digenome_depth_cutoff
-                ):
-                    caller_reasons.append("LOW_FORWARD_DEPTH")
-                if (
-                    reverse_metrics["strand_depth"]
-                    <= args.digenome_depth_cutoff
-                ):
-                    caller_reasons.append("LOW_REVERSE_DEPTH")
-                if (
-                    forward_metrics["endpoint_fraction"]
-                    <= args.digenome_fraction_cutoff
-                ):
-                    caller_reasons.append("LOW_FORWARD_FRACTION")
-                if (
-                    reverse_metrics["endpoint_fraction"]
-                    <= args.digenome_fraction_cutoff
-                ):
-                    caller_reasons.append("LOW_REVERSE_FRACTION")
-                if score <= args.digenome_score_cutoff:
-                    caller_reasons.append("LOW_DIGENOME_SCORE")
-                pair_candidates.append(
-                    DigenomePairCandidate(
-                        contig=contig,
-                        forward_position=forward_position,
-                        reverse_position=reverse_position,
-                        forward_metrics=forward_metrics,
-                        reverse_metrics=reverse_metrics,
-                        score=score,
-                        caller_filter_reasons=caller_reasons,
+                lower = expected_reverse - args.digenome_pair_window
+                upper = expected_reverse + args.digenome_pair_window
+                start = bisect.bisect_left(reverse_positions, lower)
+                end = bisect.bisect_right(reverse_positions, upper)
+                for reverse_position, _reverse_count in reverse[start:end]:
+                    forward_metrics = get_site_metrics(
+                        contig,
+                        forward_position,
+                        "+",
                     )
+                    reverse_metrics = get_site_metrics(
+                        contig,
+                        reverse_position,
+                        "-",
+                    )
+                    score = digenome_score(
+                        forward_metrics["endpoint_count"],
+                        forward_metrics["endpoint_fraction"],
+                        reverse_metrics["endpoint_count"],
+                        reverse_metrics["endpoint_fraction"],
+                    )
+                    caller_reasons: list[str] = []
+                    if (
+                        forward_metrics["endpoint_count"]
+                        <= args.digenome_forward_cutoff
+                    ):
+                        caller_reasons.append("LOW_FORWARD_COUNT")
+                    if (
+                        reverse_metrics["endpoint_count"]
+                        <= args.digenome_reverse_cutoff
+                    ):
+                        caller_reasons.append("LOW_REVERSE_COUNT")
+                    if (
+                        forward_metrics["strand_depth"]
+                        <= args.digenome_depth_cutoff
+                    ):
+                        caller_reasons.append("LOW_FORWARD_DEPTH")
+                    if (
+                        reverse_metrics["strand_depth"]
+                        <= args.digenome_depth_cutoff
+                    ):
+                        caller_reasons.append("LOW_REVERSE_DEPTH")
+                    if (
+                        forward_metrics["endpoint_fraction"]
+                        <= args.digenome_fraction_cutoff
+                    ):
+                        caller_reasons.append("LOW_FORWARD_FRACTION")
+                    if (
+                        reverse_metrics["endpoint_fraction"]
+                        <= args.digenome_fraction_cutoff
+                    ):
+                        caller_reasons.append("LOW_REVERSE_FRACTION")
+                    if score <= args.digenome_score_cutoff:
+                        caller_reasons.append("LOW_DIGENOME_SCORE")
+                    pair_candidates.append(
+                        DigenomePairCandidate(
+                            contig=contig,
+                            forward_position=forward_position,
+                            reverse_position=reverse_position,
+                            forward_metrics=forward_metrics,
+                            reverse_metrics=reverse_metrics,
+                            score=score,
+                            caller_filter_reasons=caller_reasons,
+                        )
+                    )
+        return pair_candidates
+
+    def closed_interval_candidates(
+        owned_interval: GenomicInterval,
+    ) -> list[DigenomePairCandidate]:
+        contig_length = bam.get_reference_length(owned_interval.contig)
+        overhang = args.digenome_overhang
+        pair_window = args.digenome_pair_window
+        direct_reverse_start = (
+            owned_interval.start - overhang - pair_window
+        )
+        direct_reverse_end = owned_interval.end - overhang + pair_window
+        scan_interval = GenomicInterval(
+            contig=owned_interval.contig,
+            start=owned_interval.start,
+            end=owned_interval.end,
+            scan_start=max(
+                0,
+                min(owned_interval.scan_start, direct_reverse_start),
+            ),
+            scan_end=min(
+                contig_length,
+                max(owned_interval.scan_end, direct_reverse_end),
+            ),
+        )
+        expansion_step = max(1, abs(overhang) + pair_window)
+
+        for _iteration in range(64):
+            candidates = build_pair_candidates(
+                scan_intervals=[scan_interval],
+            )
+            relevant_components = [
+                component
+                for component in group_digenome_pair_components(candidates)
+                if any(
+                    owned_interval.owns(
+                        candidate.contig,
+                        candidate.forward_position,
+                    )
+                    for candidate in component
+                )
+            ]
+            required_start = scan_interval.scan_start
+            required_end = scan_interval.scan_end
+            for component in relevant_components:
+                forward_positions = {
+                    candidate.forward_position
+                    for candidate in component
+                }
+                reverse_positions = {
+                    candidate.reverse_position
+                    for candidate in component
+                }
+                required_start = min(
+                    required_start,
+                    *(
+                        position - overhang - pair_window
+                        for position in forward_positions
+                    ),
+                    *(
+                        position + overhang - pair_window
+                        for position in reverse_positions
+                    ),
+                )
+                required_end = max(
+                    required_end,
+                    *(
+                        position - overhang + pair_window + 1
+                        for position in forward_positions
+                    ),
+                    *(
+                        position + overhang + pair_window + 1
+                        for position in reverse_positions
+                    ),
                 )
 
+            target_start = max(0, required_start)
+            target_end = min(contig_length, required_end)
+            if (
+                target_start >= scan_interval.scan_start
+                and target_end <= scan_interval.scan_end
+            ):
+                return candidates
+
+            new_scan_start = scan_interval.scan_start
+            new_scan_end = scan_interval.scan_end
+            if target_start < scan_interval.scan_start:
+                new_scan_start = max(
+                    0,
+                    min(
+                        target_start,
+                        scan_interval.scan_start - expansion_step,
+                    ),
+                )
+            if target_end > scan_interval.scan_end:
+                new_scan_end = min(
+                    contig_length,
+                    max(
+                        target_end,
+                        scan_interval.scan_end + expansion_step,
+                    ),
+                )
+            scan_interval = GenomicInterval(
+                contig=owned_interval.contig,
+                start=owned_interval.start,
+                end=owned_interval.end,
+                scan_start=new_scan_start,
+                scan_end=new_scan_end,
+            )
+            expansion_step *= 2
+
+        raise RuntimeError(
+            "Digenome matching component expansion did not converge for "
+            f"{owned_interval.contig}:{owned_interval.start}-"
+            f"{owned_interval.end}"
+        )
+
+    pair_candidates: list[DigenomePairCandidate] = []
+    selected_candidates: list[DigenomePairCandidate] = []
+    if selected_intervals is None:
+        pair_candidates = build_pair_candidates(selected_contigs=contigs)
+        selected_candidates = select_digenome_pairs(pair_candidates)
+    else:
+        for owned_interval in selected_intervals:
+            interval_candidates = closed_interval_candidates(owned_interval)
+            pair_candidates.extend(
+                candidate
+                for candidate in interval_candidates
+                if owned_interval.owns(
+                    candidate.contig,
+                    candidate.forward_position,
+                )
+            )
+            selected_candidates.extend(
+                candidate
+                for candidate in select_digenome_pairs(interval_candidates)
+                if owned_interval.owns(
+                    candidate.contig,
+                    candidate.forward_position,
+                )
+            )
+
     rows: list[dict[str, Any]] = []
-    for candidate in select_digenome_pairs(pair_candidates):
+    for candidate in selected_candidates:
         contig = candidate.contig
         forward_position = candidate.forward_position
         if not position_is_owned(
@@ -1237,16 +1418,7 @@ def call_digenome(
             )
         )
         rows.append(row)
-    owned_candidate_count = sum(
-        position_is_owned(
-            selected_intervals,
-            candidate.contig,
-            candidate.forward_position,
-            genome_blacklist,
-        )
-        for candidate in pair_candidates
-    )
-    return rows, owned_candidate_count
+    return rows, len(pair_candidates)
 
 
 def log_combination(n: int, k: int) -> float:

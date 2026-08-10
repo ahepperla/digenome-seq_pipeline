@@ -103,10 +103,13 @@ fi
 
 genome_root="${cache_dir}/${genome}"
 fingerprint_dir="${genome_root}/${fasta_sha256}"
-final_dir="${fingerprint_dir}/bwamem2"
+version_dir="${fingerprint_dir}/${bwa_version}"
+final_dir="${version_dir}/bwamem2"
 index_prefix="${final_dir}/${genome}"
 manifest="${final_dir}/index.complete.tsv"
-lock_dir="${genome_root}/.${fasta_sha256}.build.lock"
+legacy_final_dir="${fingerprint_dir}/bwamem2"
+legacy_manifest="${legacy_final_dir}/index.complete.tsv"
+lock_dir="${genome_root}/.${fasta_sha256}.${bwa_version}.build.lock"
 owner_file="${lock_dir}/owner.tsv"
 
 mkdir -p "$genome_root"
@@ -121,6 +124,28 @@ manifest_matches() {
     [[ "$(manifest_value "$manifest" fasta_sha256)" == "$fasta_sha256" ]] || return 1
     [[ "$(manifest_value "$manifest" bwa_mem2_version)" == "$bwa_version" ]] || return 1
     index_complete "$index_prefix"
+}
+
+migrate_unversioned_index() {
+    [[ ! -e "$final_dir" ]] || return 1
+    [[ -s "$legacy_manifest" ]] || return 1
+    [[ "$(manifest_value "$legacy_manifest" genome)" == "$genome" ]] || return 1
+    [[ "$(manifest_value "$legacy_manifest" fasta_sha256)" == "$fasta_sha256" ]] || return 1
+    index_complete "${legacy_final_dir}/${genome}" || return 1
+
+    local recorded_version
+    recorded_version=$(manifest_value "$legacy_manifest" bwa_mem2_version)
+    if [[ "$recorded_version" != "$bwa_version" ]] \
+        && [[ "$recorded_version" != *"/bwa-mem2-${bwa_version}_x64-linux/"* ]]; then
+        return 1
+    fi
+
+    mkdir -p "$version_dir"
+    if ! cp -al "$legacy_final_dir" "$final_dir"; then
+        rm -rf "$final_dir"
+        return 1
+    fi
+    echo "Migrated unversioned bwa-mem2 index cache: $final_dir"
 }
 
 migrate_legacy_manifest() {
@@ -174,11 +199,9 @@ index_prefix	${index_prefix}
 manifest	${manifest}
 bwa_mem2_version	${bwa_version}
 EOF
+    touch -r "$manifest" "$ready_file"
 }
 
-if [[ ! -d "$lock_dir" ]]; then
-    migrate_legacy_manifest || true
-fi
 if manifest_matches; then
     echo "Using validated bwa-mem2 index: $index_prefix"
     write_ready
@@ -246,13 +269,14 @@ if manifest_matches; then
     write_ready
     exit 0
 fi
+migrate_unversioned_index || true
 migrate_legacy_manifest || true
 if manifest_matches; then
     write_ready
     exit 0
 fi
 
-tmp_dir=$(mktemp -d "${genome_root}/.build.${fasta_sha256}.XXXXXX")
+tmp_dir=$(mktemp -d "${genome_root}/.build.${fasta_sha256}.${bwa_version}.XXXXXX")
 tmp_prefix="${tmp_dir}/${genome}"
 echo "Building bwa-mem2 index for $genome in $tmp_dir"
 bwa-mem2 index -p "$tmp_prefix" "$fasta"
@@ -272,9 +296,9 @@ bwa_mem2_version	${bwa_version}
 created_utc	$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
-mkdir -p "$fingerprint_dir"
+mkdir -p "$version_dir"
 if [[ -e "$final_dir" ]]; then
-    quarantine="${fingerprint_dir}/bwamem2.incomplete.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    quarantine="${version_dir}/bwamem2.incomplete.$(date -u +%Y%m%dT%H%M%SZ).$$"
     echo "Moving incomplete index aside: $quarantine" >&2
     mv "$final_dir" "$quarantine"
 fi
