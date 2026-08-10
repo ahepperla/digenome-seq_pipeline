@@ -76,6 +76,41 @@ class WorkflowStaticTests(unittest.TestCase):
         )[1].split("}", 1)[0]
         self.assertIn("cpus = 1", chunk_block)
 
+    def test_parameter_reference_covers_every_configured_parameter(
+        self,
+    ) -> None:
+        config = (ROOT / "nextflow.config").read_text()
+        reference = (ROOT / "docs" / "parameters.md").read_text()
+        readme = (ROOT / "README.md").read_text()
+        params_block = config.split("params {", 1)[1].split("\n}", 1)[0]
+        configured = set(
+            re.findall(
+                r"^    ([a-z][a-z0-9_]*)\s*=",
+                params_block,
+                flags=re.MULTILINE,
+            )
+        )
+        documented_names = re.findall(
+            r"^\| `(?:--|params\.)([a-z][a-z0-9_]*)` \|",
+            reference,
+            flags=re.MULTILINE,
+        )
+        documented = set(documented_names)
+
+        self.assertEqual(documented, configured)
+        self.assertEqual(len(documented_names), len(documented))
+        for line in reference.splitlines():
+            if re.match(
+                r"^\| `(?:--|params\.)[a-z][a-z0-9_]*` \|",
+                line,
+            ):
+                cells = line.split("|")
+                self.assertTrue(cells[3].strip())
+        self.assertIn(
+            "[docs/parameters.md](docs/parameters.md)",
+            readme,
+        )
+
     def test_chunk_plan_is_joined_before_one_to_many_expansion(self) -> None:
         main = (ROOT / "main.nf").read_text()
         request_block = main.split(

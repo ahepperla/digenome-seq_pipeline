@@ -148,6 +148,10 @@ The template is at `assets/samplesheet_template.csv`.
 
 ## Common options
 
+The complete lookup for all pipeline parameters, defaults, comparison
+semantics, interactions, and examples is
+[docs/parameters.md](docs/parameters.md).
+
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--analysis` | `digenome` | Select DSB or SSB calling |
