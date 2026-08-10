@@ -107,6 +107,21 @@ FLOAT_FIELDS = {
 }
 
 
+@dataclass(frozen=True)
+class GenomicInterval:
+    contig: str
+    start: int
+    end: int
+    scan_start: int
+    scan_end: int
+
+    def owns(self, contig: str, position: int) -> bool:
+        return (
+            self.contig == contig
+            and self.start <= position < self.end
+        )
+
+
 # Basic alignment and endpoint measurements.
 
 def mean_or_zero(values: Iterable[float]) -> float:
@@ -179,17 +194,43 @@ def scan_candidate_endpoints(
     min_count: int,
     min_mapq: int,
     contigs: Iterable[str] | None = None,
+    intervals: Iterable[GenomicInterval] | None = None,
 ) -> list[tuple[str, int, str, int]]:
     """Stream a coordinate-sorted BAM and retain endpoint runs above cutoff."""
-    candidates: list[tuple[str, int, str, int]] = []
-    selected_contigs = list(contigs) if contigs is not None else list(bam.references)
+    if contigs is not None and intervals is not None:
+        raise ValueError("Specify contigs or intervals, not both")
+
+    if intervals is None:
+        selected_contigs = (
+            list(contigs) if contigs is not None else list(bam.references)
+        )
+        lengths = dict(zip(bam.references, bam.lengths))
+        selected_intervals = [
+            GenomicInterval(
+                contig=contig,
+                start=0,
+                end=int(lengths[contig]),
+                scan_start=0,
+                scan_end=int(lengths[contig]),
+            )
+            for contig in selected_contigs
+            if contig in lengths
+        ]
+    else:
+        selected_intervals = list(intervals)
+        selected_contigs = [
+            interval.contig for interval in selected_intervals
+        ]
+
     unknown = sorted(set(selected_contigs) - set(bam.references))
     if unknown:
         raise ValueError(
             "Requested contig(s) are absent from the BAM: "
             + ", ".join(unknown)
         )
-    for contig in selected_contigs:
+    candidates: dict[tuple[str, int, str], int] = {}
+    for interval in selected_intervals:
+        contig = interval.contig
         forward_position: int | None = None
         forward_count = 0
         reverse_counts: dict[int, int] = {}
@@ -198,14 +239,20 @@ def scan_candidate_endpoints(
 
         def save_forward() -> None:
             if forward_position is not None and forward_count >= min_count:
-                candidates.append((contig, forward_position, "+", forward_count))
+                key = (contig, forward_position, "+")
+                candidates[key] = max(candidates.get(key, 0), forward_count)
 
         def save_reverse(position: int) -> None:
             count = reverse_counts.pop(position, 0)
             if count >= min_count:
-                candidates.append((contig, position, "-", count))
+                key = (contig, position, "-")
+                candidates[key] = max(candidates.get(key, 0), count)
 
-        for read in bam.fetch(contig):
+        for read in bam.fetch(
+            contig,
+            interval.scan_start,
+            interval.scan_end,
+        ):
             if not eligible_primary(read, min_mapq):
                 continue
             if read.reference_start < previous_start:
@@ -219,6 +266,8 @@ def scan_candidate_endpoints(
                 save_reverse(heapq.heappop(reverse_heap))
 
             endpoint = endpoint_position(read)
+            if not interval.scan_start <= endpoint < interval.scan_end:
+                continue
             if read.is_reverse:
                 if endpoint not in reverse_counts:
                     reverse_counts[endpoint] = 0
@@ -235,8 +284,10 @@ def scan_candidate_endpoints(
         while reverse_heap:
             save_reverse(heapq.heappop(reverse_heap))
 
-    candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-    return candidates
+    return [
+        (*key, candidates[key])
+        for key in sorted(candidates)
+    ]
 
 
 def measure_site_metrics(
@@ -808,20 +859,44 @@ def create_base_call_row(
     }
 
 
+def position_is_owned(
+    intervals: Iterable[GenomicInterval] | None,
+    contig: str,
+    position: int,
+) -> bool:
+    return intervals is None or any(
+        interval.owns(contig, position) for interval in intervals
+    )
+
+
 def call_ndigenome(
     bam: Any,
     variant_file: Any | None,
     args: argparse.Namespace,
     contigs: Iterable[str] | None = None,
+    intervals: Iterable[GenomicInterval] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
+    selected_intervals = (
+        list(intervals) if intervals is not None else None
+    )
     scanned = scan_candidate_endpoints(
         bam,
         args.ndigenome_min_count,
         args.ndigenome_min_mapq,
         contigs,
+        selected_intervals,
     )
+    owned_scanned = [
+        candidate
+        for candidate in scanned
+        if position_is_owned(
+            selected_intervals,
+            candidate[0],
+            candidate[1],
+        )
+    ]
     rows: list[dict[str, Any]] = []
-    for contig, position, strand, scanned_count in scanned:
+    for contig, position, strand, scanned_count in owned_scanned:
         metrics = measure_site_metrics(
             bam,
             contig,
@@ -945,7 +1020,7 @@ def call_ndigenome(
             )
         )
         rows.append(row)
-    return rows, len(scanned)
+    return rows, len(owned_scanned)
 
 
 def call_digenome(
@@ -953,7 +1028,11 @@ def call_digenome(
     variant_file: Any | None,
     args: argparse.Namespace,
     contigs: Iterable[str] | None = None,
+    intervals: Iterable[GenomicInterval] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
+    selected_intervals = (
+        list(intervals) if intervals is not None else None
+    )
     scan_minimum = min(
         args.digenome_forward_cutoff + 1,
         args.digenome_reverse_cutoff + 1,
@@ -963,6 +1042,7 @@ def call_digenome(
         scan_minimum,
         args.digenome_min_mapq,
         contigs,
+        selected_intervals,
     )
     by_contig: dict[str, dict[str, list[tuple[int, int]]]] = {}
     for contig, position, strand, count in scanned:
@@ -1065,6 +1145,12 @@ def call_digenome(
     for candidate in select_digenome_pairs(pair_candidates):
         contig = candidate.contig
         forward_position = candidate.forward_position
+        if not position_is_owned(
+            selected_intervals,
+            contig,
+            forward_position,
+        ):
+            continue
         reverse_position = candidate.reverse_position
         forward_metrics = candidate.forward_metrics
         reverse_metrics = candidate.reverse_metrics
@@ -1109,7 +1195,15 @@ def call_digenome(
             )
         )
         rows.append(row)
-    return rows, len(pair_candidates)
+    owned_candidate_count = sum(
+        position_is_owned(
+            selected_intervals,
+            candidate.contig,
+            candidate.forward_position,
+        )
+        for candidate in pair_candidates
+    )
+    return rows, owned_candidate_count
 
 
 def log_combination(n: int, k: int) -> float:
@@ -1413,6 +1507,7 @@ def parameter_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     internal = {
         "chunk_id",
         "contigs_file",
+        "intervals_file",
         "raw_output",
         "summary_output",
     }
@@ -1588,7 +1683,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-sample", default="")
     parser.add_argument("--variant-vcf")
     parser.add_argument("--keep-multimappers", action="store_true")
-    parser.add_argument("--contigs-file")
+    parser.add_argument("--intervals-file")
     parser.add_argument("--chunk-id")
     parser.add_argument("--raw-output")
     parser.add_argument("--summary-output")
@@ -1641,14 +1736,14 @@ def validate_args(args: argparse.Namespace) -> None:
             f"Expected one of: {', '.join(sorted(ANALYSES))}"
         )
     chunk_fields = (
-        getattr(args, "contigs_file", None),
+        getattr(args, "intervals_file", None),
         getattr(args, "chunk_id", None),
         getattr(args, "raw_output", None),
         getattr(args, "summary_output", None),
     )
     if any(chunk_fields) and not all(chunk_fields):
         raise ValueError(
-            "Chunk mode requires --contigs-file, --chunk-id, "
+            "Chunk mode requires --intervals-file, --chunk-id, "
             "--raw-output, and --summary-output"
         )
     if args.ndigenome_min_count < 1:
@@ -1704,6 +1799,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def call_candidate_rows(
     args: argparse.Namespace,
     contigs: Iterable[str] | None = None,
+    intervals: Iterable[GenomicInterval] | None = None,
     adjust_q_values: bool = True,
 ) -> tuple[list[dict[str, Any]], int]:
     if pysam is None:
@@ -1717,6 +1813,16 @@ def call_candidate_rows(
         else args.digenome_min_mapq
     )
     require_paired = args.analysis == "ndigenome"
+    if contigs is not None and intervals is not None:
+        raise ValueError("Specify contigs or intervals, not both")
+    selected_intervals = (
+        list(intervals) if intervals is not None else None
+    )
+    analyzed_contigs = (
+        list(dict.fromkeys(interval.contig for interval in selected_intervals))
+        if selected_intervals is not None
+        else contigs
+    )
 
     with pysam.AlignmentFile(args.bam, "rb") as bam:
         if not bam.has_index():
@@ -1727,6 +1833,8 @@ def call_candidate_rows(
                 "BAM must declare coordinate sort order, found: "
                 f"{sort_order or 'missing'}"
             )
+        if selected_intervals is not None:
+            validate_intervals_against_bam(selected_intervals, bam)
         check_bam_layout(bam, min_mapq, require_paired, "BAM")
 
         control_bam = None
@@ -1774,16 +1882,24 @@ def call_candidate_rows(
                 validate_variant_contigs(
                     variant_file,
                     bam,
-                    contigs,
+                    analyzed_contigs,
                 )
 
             if args.analysis == "ndigenome":
                 rows, candidate_count = call_ndigenome(
-                    bam, variant_file, args, contigs
+                    bam,
+                    variant_file,
+                    args,
+                    contigs,
+                    selected_intervals,
                 )
             else:
                 rows, candidate_count = call_digenome(
-                    bam, variant_file, args, contigs
+                    bam,
+                    variant_file,
+                    args,
+                    contigs,
+                    selected_intervals,
                 )
             add_control_evidence(
                 rows,
@@ -1799,42 +1915,108 @@ def call_candidate_rows(
     return rows, candidate_count
 
 
-def read_contigs_file(path: str) -> list[str]:
-    contigs = [
-        line.strip()
-        for line in Path(path).read_text().splitlines()
-        if line.strip()
-    ]
-    if not contigs:
-        raise ValueError(f"Contigs file is empty: {path}")
-    duplicates = sorted(
-        contig for contig, count in Counter(contigs).items() if count > 1
-    )
-    if duplicates:
-        raise ValueError(
-            "Contigs file contains duplicate entries: "
-            + ", ".join(duplicates)
-        )
-    return contigs
+def read_intervals_file(path: str) -> list[GenomicInterval]:
+    intervals: list[GenomicInterval] = []
+    with Path(path).open(newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required_fields = {
+            "contig",
+            "owner_start",
+            "owner_end",
+            "scan_start",
+            "scan_end",
+        }
+        if reader.fieldnames is None or not required_fields.issubset(
+            reader.fieldnames
+        ):
+            raise ValueError(
+                f"Interval file has an invalid header: {path}"
+            )
+        for line_number, row in enumerate(reader, start=2):
+            try:
+                interval = GenomicInterval(
+                    contig=row["contig"],
+                    start=int(row["owner_start"]),
+                    end=int(row["owner_end"]),
+                    scan_start=int(row["scan_start"]),
+                    scan_end=int(row["scan_end"]),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid interval coordinates in {path} "
+                    f"line {line_number}"
+                ) from exc
+            if not interval.contig:
+                raise ValueError(
+                    f"Missing interval contig in {path} line {line_number}"
+                )
+            if not (
+                0 <= interval.scan_start
+                <= interval.start
+                < interval.end
+                <= interval.scan_end
+            ):
+                raise ValueError(
+                    f"Invalid owned/padded interval in {path} "
+                    f"line {line_number}"
+                )
+            intervals.append(interval)
+    if not intervals:
+        raise ValueError(f"Interval file is empty: {path}")
+
+    previous_by_contig: dict[str, GenomicInterval] = {}
+    for interval in sorted(
+        intervals,
+        key=lambda item: (item.contig, item.start, item.end),
+    ):
+        previous = previous_by_contig.get(interval.contig)
+        if previous is not None and interval.start < previous.end:
+            raise ValueError(
+                "Interval file contains overlapping ownership ranges on "
+                f"{interval.contig}: {previous.start}-{previous.end} and "
+                f"{interval.start}-{interval.end}"
+            )
+        previous_by_contig[interval.contig] = interval
+    return intervals
 
 
-def mapped_bam_contigs(bam_path: str) -> list[str]:
+def validate_intervals_against_bam(
+    intervals: Iterable[GenomicInterval],
+    bam: Any,
+) -> None:
+    lengths = dict(zip(bam.references, bam.lengths))
+    for interval in intervals:
+        if interval.contig not in lengths:
+            raise ValueError(
+                f"Requested contig is absent from the BAM: {interval.contig}"
+            )
+        contig_length = int(lengths[interval.contig])
+        if interval.scan_end > contig_length:
+            raise ValueError(
+                f"Interval exceeds BAM contig length for {interval.contig}: "
+                f"{interval.scan_end} > {contig_length}"
+            )
+
+
+def mapped_bam_contig_lengths(bam_path: str) -> dict[str, int]:
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         if not bam.has_index():
             raise ValueError(f"BAM is not indexed: {bam_path}")
-        return [
-            index_stats.contig
+        lengths = dict(zip(bam.references, bam.lengths))
+        return {
+            index_stats.contig: int(lengths[index_stats.contig])
             for index_stats in bam.get_index_statistics()
             if index_stats.mapped > 0
-        ]
+        }
 
 
 def run_chunk_calling(args: argparse.Namespace) -> dict[str, Any]:
     validate_args(args)
-    contigs = read_contigs_file(args.contigs_file)
+    intervals = read_intervals_file(args.intervals_file)
+    contigs = list(dict.fromkeys(interval.contig for interval in intervals))
     rows, candidate_count = call_candidate_rows(
         args,
-        contigs=contigs,
+        intervals=intervals,
         adjust_q_values=False,
     )
     rows.sort(
@@ -1851,16 +2033,29 @@ def run_chunk_calling(args: argparse.Namespace) -> dict[str, Any]:
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(raw_path, "wt", compresslevel=1) as handle:
         for row in rows:
+            row["_chunk_id"] = args.chunk_id
             handle.write(json.dumps(row, sort_keys=True))
             handle.write("\n")
 
+    expected_contig_lengths = mapped_bam_contig_lengths(args.bam)
     summary = {
-        "schema_version": 1,
+        "schema_version": 2,
         "sample": args.sample,
         "analysis": args.analysis,
         "chunk_id": args.chunk_id,
         "contigs": contigs,
-        "expected_contigs": mapped_bam_contigs(args.bam),
+        "intervals": [
+            {
+                "contig": interval.contig,
+                "start": interval.start,
+                "end": interval.end,
+                "scan_start": interval.scan_start,
+                "scan_end": interval.scan_end,
+            }
+            for interval in intervals
+        ],
+        "expected_contigs": list(expected_contig_lengths),
+        "expected_contig_lengths": expected_contig_lengths,
         "candidate_count": candidate_count,
         "reported_rows": len(rows),
         "parameters": parameter_snapshot(args),
@@ -1883,12 +2078,12 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        if args.contigs_file:
+        if args.intervals_file:
             chunk = run_chunk_calling(args)
             print(
                 f"{args.analysis} chunk {args.chunk_id}: "
                 f"{chunk['reported_rows']} row(s) from "
-                f"{len(chunk['contigs'])} contig(s)."
+                f"{len(chunk['intervals'])} interval(s)."
             )
             return
         qc = run_serial_calling(args)

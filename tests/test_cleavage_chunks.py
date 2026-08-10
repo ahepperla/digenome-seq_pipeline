@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
 import sys
 import tempfile
@@ -195,7 +196,7 @@ class CleavageChunkTests(unittest.TestCase):
             control_sample="Control",
             variant_vcf=str(vcf),
             keep_multimappers=True,
-            contigs_file=None,
+            intervals_file=None,
             chunk_id=None,
             raw_output=None,
             summary_output=None,
@@ -239,31 +240,61 @@ class CleavageChunkTests(unittest.TestCase):
         chunks = planner.plan_chunks(str(bam), 2)
         self.assertEqual(
             [
-                (chunk["mapped_records"], chunk["contigs"])
+                (
+                    chunk["mapped_records"],
+                    [
+                        (
+                            interval["contig"],
+                            interval["start"],
+                            interval["end"],
+                        )
+                        for interval in chunk["intervals"]
+                    ],
+                )
                 for chunk in chunks
             ],
-            [(8, ["chr1"]), (8, ["chr2", "chr3"])],
+            [
+                (8, [("chr1", 0, 2000)]),
+                (8, [("chr2", 0, 2000), ("chr3", 0, 2000)]),
+            ],
         )
 
         capped = planner.plan_chunks(str(bam), 20)
-        self.assertEqual(len(capped), 3)
-        self.assertTrue(all(chunk["contigs"] for chunk in capped))
+        self.assertEqual(len(capped), 16)
+        self.assertTrue(all(chunk["intervals"] for chunk in capped))
+        self.assertTrue(
+            any(
+                interval["start"] > 0 or interval["end"] < 2000
+                for chunk in capped
+                for interval in chunk["intervals"]
+            )
+        )
 
         output_dir = self.tmp / "plan"
         plan_path = self.tmp / "chunks.tsv"
-        planner.write_plan(chunks, output_dir, plan_path)
+        padded_chunks = planner.plan_chunks(str(bam), 2, padding=10)
+        planner.write_plan(padded_chunks, output_dir, plan_path)
         self.assertEqual(
             sorted(path.name for path in output_dir.iterdir()),
-            ["chunk_000.contigs.txt", "chunk_001.contigs.txt"],
+            ["chunk_000.intervals.tsv", "chunk_001.intervals.tsv"],
         )
+        intervals = cleavage.read_intervals_file(
+            str(output_dir / "chunk_000.intervals.tsv")
+        )
+        self.assertEqual(intervals[0].scan_start, 0)
+        self.assertEqual(intervals[0].scan_end, 2000)
 
-    def test_duplicate_contigs_are_rejected(self) -> None:
-        contigs = self.tmp / "duplicate.contigs.txt"
-        contigs.write_text("chr1\nchr1\n")
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            cleavage.read_contigs_file(str(contigs))
+    def test_overlapping_owned_intervals_are_rejected(self) -> None:
+        intervals = self.tmp / "overlap.intervals.tsv"
+        intervals.write_text(
+            "contig\towner_start\towner_end\tscan_start\tscan_end\n"
+            "chr1\t0\t1100\t0\t1110\n"
+            "chr1\t1000\t2000\t990\t2000\n"
+        )
+        with self.assertRaisesRegex(ValueError, "overlapping"):
+            cleavage.read_intervals_file(str(intervals))
 
-    def test_finalizer_rejects_missing_chunk_contigs(self) -> None:
+    def test_finalizer_rejects_missing_chunk_intervals(self) -> None:
         summary = self.tmp / "missing.chunk.json"
         summary.write_text(
             json.dumps(
@@ -272,7 +303,14 @@ class CleavageChunkTests(unittest.TestCase):
                     "analysis": "ndigenome",
                     "chunk_id": "chunk_000",
                     "contigs": ["chr1"],
+                    "intervals": [
+                        {"contig": "chr1", "start": 0, "end": 2000}
+                    ],
                     "expected_contigs": ["chr1", "chr2"],
+                    "expected_contig_lengths": {
+                        "chr1": 2000,
+                        "chr2": 2000,
+                    },
                     "parameters": {},
                 }
             )
@@ -284,11 +322,11 @@ class CleavageChunkTests(unittest.TestCase):
                 "ndigenome",
             )
 
-    def test_finalizer_rejects_overlapping_chunk_contigs(self) -> None:
+    def test_finalizer_rejects_overlapping_chunk_intervals(self) -> None:
         summaries = []
-        for chunk_id, contigs in (
-            ("chunk_000", ["chr1"]),
-            ("chunk_001", ["chr1", "chr2"]),
+        for chunk_id, start, end in (
+            ("chunk_000", 0, 1200),
+            ("chunk_001", 1000, 2000),
         ):
             path = self.tmp / f"{chunk_id}.json"
             path.write_text(
@@ -297,19 +335,205 @@ class CleavageChunkTests(unittest.TestCase):
                         "sample": "Sample",
                         "analysis": "ndigenome",
                         "chunk_id": chunk_id,
-                        "contigs": contigs,
-                        "expected_contigs": ["chr1", "chr2"],
+                        "contigs": ["chr1"],
+                        "intervals": [
+                            {
+                                "contig": "chr1",
+                                "start": start,
+                                "end": end,
+                            }
+                        ],
+                        "expected_contigs": ["chr1"],
+                        "expected_contig_lengths": {"chr1": 2000},
                         "parameters": {},
                     }
                 )
             )
             summaries.append(str(path))
-        with self.assertRaisesRegex(ValueError, "assigned to both"):
+        with self.assertRaisesRegex(ValueError, "overlaps"):
             finalizer.load_summaries(
                 summaries,
                 "Sample",
                 "ndigenome",
             )
+
+    def test_finalizer_rejects_a_row_outside_chunk_ownership(self) -> None:
+        fragment = self.tmp / "outside.raw.jsonl.gz"
+        with gzip.open(fragment, "wt") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "_chunk_id": "chunk_000",
+                        "contig": "chr1",
+                        "position_0based": 1200,
+                        "strand": "+",
+                    }
+                )
+                + "\n"
+            )
+        summaries = [
+            {
+                "chunk_id": "chunk_000",
+                "intervals": [
+                    {"contig": "chr1", "start": 0, "end": 1000}
+                ],
+            }
+        ]
+        connection = finalizer.create_database(":memory:")
+        try:
+            with self.assertRaisesRegex(ValueError, "outside"):
+                finalizer.load_fragments(
+                    connection,
+                    [str(fragment)],
+                    summaries,
+                )
+        finally:
+            connection.close()
+
+    def test_boundary_padding_preserves_calls_without_duplicates(self) -> None:
+        forward_position = 1001
+        reverse_position = 999
+        treated_reads = [
+            self.make_read(
+                f"boundary_forward_signal_{index}",
+                0,
+                forward_position,
+                mapq=0,
+            )
+            for index in range(8)
+        ]
+        treated_reads += [
+            self.make_read(
+                f"boundary_reverse_signal_{index}",
+                0,
+                reverse_position - 49,
+                reverse=True,
+                mapq=0,
+            )
+            for index in range(8)
+        ]
+        treated_reads += [
+            self.make_read(
+                f"boundary_forward_background_{index}",
+                0,
+                forward_position - 20 - index,
+                mapq=0,
+            )
+            for index in range(12)
+        ]
+        treated_reads += [
+            self.make_read(
+                f"boundary_reverse_background_{index}",
+                0,
+                reverse_position - 48 + index,
+                reverse=True,
+                mapq=0,
+            )
+            for index in range(12)
+        ]
+        treated = self.write_bam("boundary_treated", treated_reads)
+        vcf = self.write_variant_vcf()
+        chunks = planner.plan_chunks(str(treated), 2, padding=10)
+        self.assertEqual(
+            [
+                (
+                    interval["start"],
+                    interval["end"],
+                    interval["scan_start"],
+                    interval["scan_end"],
+                )
+                for chunk in chunks
+                for interval in chunk["intervals"]
+            ],
+            [(0, 1000, 0, 1010), (1000, 2000, 990, 2000)],
+        )
+        plan_dir = self.tmp / "boundary_plan"
+        planner.write_plan(
+            chunks,
+            plan_dir,
+            self.tmp / "boundary_plan.tsv",
+        )
+
+        for analysis in ("digenome", "ndigenome"):
+            serial_prefix = self.tmp / f"boundary_serial_{analysis}"
+            chunked_prefix = self.tmp / f"boundary_chunked_{analysis}"
+            serial_args = self.caller_args(
+                treated,
+                Path(""),
+                vcf,
+                serial_prefix,
+                analysis,
+            )
+            serial_args.control_bam = ""
+            serial_args.control_sample = ""
+            serial_args.digenome_overhang = 2
+            serial_qc = cleavage.run_serial_calling(serial_args)
+
+            raw_fragments = []
+            summaries = []
+            for interval_file in sorted(
+                plan_dir.glob("*.intervals.tsv")
+            ):
+                chunk_id = interval_file.name.removesuffix(
+                    ".intervals.tsv"
+                )
+                raw_path = self.tmp / (
+                    f"boundary.{chunk_id}.{analysis}.raw.jsonl.gz"
+                )
+                summary_path = self.tmp / (
+                    f"boundary.{chunk_id}.{analysis}.chunk.json"
+                )
+                args = self.caller_args(
+                    treated,
+                    Path(""),
+                    vcf,
+                    chunked_prefix,
+                    analysis,
+                )
+                args.control_bam = ""
+                args.control_sample = ""
+                args.digenome_overhang = 2
+                args.intervals_file = str(interval_file)
+                args.chunk_id = chunk_id
+                args.raw_output = str(raw_path)
+                args.summary_output = str(summary_path)
+                cleavage.run_chunk_calling(args)
+                raw_fragments.append(str(raw_path))
+                summaries.append(str(summary_path))
+
+            chunked_qc = finalizer.finalize_chunks(
+                argparse.Namespace(
+                    sample="Sample",
+                    analysis=analysis,
+                    output_prefix=str(chunked_prefix),
+                    raw_fragment=raw_fragments,
+                    chunk_summary=summaries,
+                )
+            )
+            self.assertEqual(
+                Path(f"{serial_prefix}.{analysis}.all.tsv").read_bytes(),
+                Path(f"{chunked_prefix}.{analysis}.all.tsv").read_bytes(),
+            )
+            self.assertEqual(
+                serial_qc["candidate_endpoints_or_pairs_before_filters"],
+                chunked_qc[
+                    "candidate_endpoints_or_pairs_before_filters"
+                ],
+            )
+            with Path(
+                f"{chunked_prefix}.{analysis}.all.tsv"
+            ).open(newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            keys = [
+                (
+                    row["contig"],
+                    row["position_0based"],
+                    row["strand"],
+                )
+                for row in rows
+            ]
+            self.assertEqual(len(keys), len(set(keys)))
+            self.assertGreater(len(keys), 0)
 
     def test_serial_and_chunked_outputs_are_equivalent(self) -> None:
         treated_reads = self.endpoint_site_reads(0, 500, 8, "chr1")
@@ -338,10 +562,10 @@ class CleavageChunkTests(unittest.TestCase):
         control = self.write_bam("control", control_reads)
         vcf = self.write_variant_vcf()
 
-        chunks = planner.plan_chunks(str(treated), 2)
+        chunks = planner.plan_chunks(str(treated), 4, padding=10)
         plan_dir = self.tmp / "chunk_plan"
         planner.write_plan(chunks, plan_dir, self.tmp / "chunk_plan.tsv")
-        contig_files = sorted(plan_dir.glob("*.contigs.txt"))
+        interval_files = sorted(plan_dir.glob("*.intervals.tsv"))
 
         for analysis in ("digenome", "ndigenome"):
             serial_prefix = self.tmp / f"serial_{analysis}"
@@ -358,8 +582,8 @@ class CleavageChunkTests(unittest.TestCase):
 
             raw_fragments = []
             summaries = []
-            for contig_file in contig_files:
-                chunk_id = contig_file.name.removesuffix(".contigs.txt")
+            for interval_file in interval_files:
+                chunk_id = interval_file.name.removesuffix(".intervals.tsv")
                 raw_path = (
                     self.tmp / f"{chunk_id}.{analysis}.raw.jsonl.gz"
                 )
@@ -373,7 +597,7 @@ class CleavageChunkTests(unittest.TestCase):
                     chunked_prefix,
                     analysis,
                 )
-                args.contigs_file = str(contig_file)
+                args.intervals_file = str(interval_file)
                 args.chunk_id = chunk_id
                 args.raw_output = str(raw_path)
                 args.summary_output = str(summary_path)
@@ -425,7 +649,7 @@ class CleavageChunkTests(unittest.TestCase):
 
             qc_path = Path(f"{chunked_prefix}.{analysis}.qc.json")
             qc_document = json.loads(qc_path.read_text())
-            self.assertEqual(qc_document["parameters"]["cleavage_chunks"], 2)
+            self.assertEqual(qc_document["parameters"]["cleavage_chunks"], 4)
 
 
 if __name__ == "__main__":

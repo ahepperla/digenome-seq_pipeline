@@ -55,6 +55,13 @@ class WorkflowStaticTests(unittest.TestCase):
             "int cleavage_chunks = params.cleavage_chunks as int",
             main,
         )
+        self.assertIn(
+            "int cleavage_chunk_padding = [",
+            main,
+        )
+        self.assertIn("--padding ${chunk_padding}", main)
+        self.assertIn("--intervals-file", main)
+        self.assertIn('path("chunk_*.intervals.tsv")', main)
         self.assertIn("withName: CLEAVAGE_CALL_CHUNK", base)
         self.assertIn(
             "maxForks = params.cleavage_chunks as int",

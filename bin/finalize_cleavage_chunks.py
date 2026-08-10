@@ -18,7 +18,7 @@ import call_cleavage as cleavage
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Merge contig-chunk cleavage calls, calculate global q-values, "
+            "Merge interval-chunk cleavage calls, calculate global q-values, "
             "and write final pipeline outputs."
         )
     )
@@ -46,7 +46,7 @@ def load_summaries(
         raise ValueError("No chunk summaries were supplied")
 
     chunk_ids: set[str] = set()
-    reference_parameters = summaries[0]["parameters"]
+    reference_parameters = dict(summaries[0]["parameters"])
     expected_contigs = summaries[0].get("expected_contigs")
     if not expected_contigs:
         raise ValueError(
@@ -54,8 +54,22 @@ def load_summaries(
         )
     if len(expected_contigs) != len(set(expected_contigs)):
         raise ValueError("Expected BAM contig list contains duplicates")
+    expected_contig_lengths = summaries[0].get(
+        "expected_contig_lengths"
+    )
+    if (
+        not isinstance(expected_contig_lengths, dict)
+        or set(expected_contig_lengths) != set(expected_contigs)
+    ):
+        raise ValueError(
+            "Chunk summaries do not declare all expected BAM contig lengths"
+        )
 
-    assigned_contigs: dict[str, str] = {}
+    assigned_intervals: dict[
+        str, list[tuple[int, int, str]]
+    ] = {
+        contig: [] for contig in expected_contigs
+    }
     for summary in summaries:
         if summary.get("sample") != sample:
             raise ValueError(
@@ -81,37 +95,82 @@ def load_summaries(
             raise ValueError(
                 "Chunk summaries disagree about the expected BAM contigs"
             )
+        if summary.get(
+            "expected_contig_lengths"
+        ) != expected_contig_lengths:
+            raise ValueError(
+                "Chunk summaries disagree about expected BAM contig lengths"
+            )
         chunk_contigs = summary.get("contigs")
         if not isinstance(chunk_contigs, list) or not chunk_contigs:
             raise ValueError(
                 f"Chunk {chunk_id} has no declared contigs"
             )
-        for contig in chunk_contigs:
-            previous_chunk = assigned_contigs.get(contig)
-            if previous_chunk is not None:
+        chunk_intervals = summary.get("intervals")
+        if not isinstance(chunk_intervals, list) or not chunk_intervals:
+            raise ValueError(
+                f"Chunk {chunk_id} has no declared intervals"
+            )
+        interval_contigs: list[str] = []
+        for interval in chunk_intervals:
+            if not isinstance(interval, dict):
                 raise ValueError(
-                    f"Contig '{contig}' is assigned to both "
+                    f"Chunk {chunk_id} contains an invalid interval"
+                )
+            contig = interval.get("contig")
+            if contig not in expected_contig_lengths:
+                raise ValueError(
+                    f"Chunk {chunk_id} contains unexpected contig: {contig}"
+                )
+            try:
+                start = int(interval["start"])
+                end = int(interval["end"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Chunk {chunk_id} contains invalid interval coordinates"
+                ) from exc
+            contig_length = int(expected_contig_lengths[contig])
+            if not 0 <= start < end <= contig_length:
+                raise ValueError(
+                    f"Chunk {chunk_id} interval is outside {contig}: "
+                    f"{start}-{end} of {contig_length}"
+                )
+            assigned_intervals[contig].append((start, end, chunk_id))
+            interval_contigs.append(contig)
+        if list(dict.fromkeys(interval_contigs)) != chunk_contigs:
+            raise ValueError(
+                f"Chunk {chunk_id} contig and interval declarations disagree"
+            )
+
+    for contig in expected_contigs:
+        intervals = sorted(assigned_intervals[contig])
+        if not intervals:
+            raise ValueError(
+                f"Chunk interval coverage is missing: {contig}:0-"
+                f"{expected_contig_lengths[contig]}"
+            )
+        cursor = 0
+        previous_chunk = ""
+        for start, end, chunk_id in intervals:
+            if start > cursor:
+                raise ValueError(
+                    f"Chunk interval coverage has a gap on {contig}: "
+                    f"{cursor}-{start}"
+                )
+            if start < cursor:
+                raise ValueError(
+                    f"Chunk interval ownership overlaps on {contig} at "
+                    f"{start}-{min(cursor, end)} between "
                     f"{previous_chunk} and {chunk_id}"
                 )
-            assigned_contigs[contig] = chunk_id
-
-    missing_contigs = [
-        contig for contig in expected_contigs if contig not in assigned_contigs
-    ]
-    unexpected_contigs = sorted(
-        set(assigned_contigs) - set(expected_contigs)
-    )
-    if missing_contigs or unexpected_contigs:
-        details: list[str] = []
-        if missing_contigs:
-            details.append("missing: " + ", ".join(missing_contigs))
-        if unexpected_contigs:
-            details.append("unexpected: " + ", ".join(unexpected_contigs))
-        raise ValueError(
-            "Chunk contig coverage is incomplete or inconsistent ("
-            + "; ".join(details)
-            + ")"
-        )
+            cursor = end
+            previous_chunk = chunk_id
+        contig_length = int(expected_contig_lengths[contig])
+        if cursor < contig_length:
+            raise ValueError(
+                f"Chunk interval coverage has a gap on {contig}: "
+                f"{cursor}-{contig_length}"
+            )
     return summaries, reference_parameters
 
 
@@ -129,7 +188,8 @@ def create_database(path: str) -> sqlite3.Connection:
             strand TEXT NOT NULL,
             fisher_p REAL,
             fisher_q REAL,
-            payload TEXT NOT NULL
+            payload TEXT NOT NULL,
+            UNIQUE (contig, position_0based, strand)
         )
         """
     )
@@ -139,7 +199,19 @@ def create_database(path: str) -> sqlite3.Connection:
 def load_fragments(
     connection: sqlite3.Connection,
     paths: Iterable[str],
+    summaries: Iterable[dict[str, Any]],
 ) -> int:
+    owned_intervals = {
+        summary["chunk_id"]: [
+            (
+                interval["contig"],
+                int(interval["start"]),
+                int(interval["end"]),
+            )
+            for interval in summary["intervals"]
+        ]
+        for summary in summaries
+    }
     inserted = 0
     batch: list[tuple[str, int, str, float | None, str]] = []
     for path in paths:
@@ -153,10 +225,28 @@ def load_fragments(
                     raise ValueError(
                         f"Invalid JSON in {path} line {line_number}: {exc}"
                     ) from exc
+                chunk_id = row.get("_chunk_id")
+                if chunk_id not in owned_intervals:
+                    raise ValueError(
+                        f"Raw row in {path} line {line_number} has unknown "
+                        f"chunk identifier: {chunk_id}"
+                    )
+                contig = row["contig"]
+                position = int(row["position_0based"])
+                if not any(
+                    owned_contig == contig
+                    and start <= position < end
+                    for owned_contig, start, end
+                    in owned_intervals[chunk_id]
+                ):
+                    raise ValueError(
+                        f"Raw row in {path} line {line_number} is outside "
+                        f"chunk {chunk_id} ownership: {contig}:{position}"
+                    )
                 batch.append(
                     (
-                        row["contig"],
-                        int(row["position_0based"]),
+                        contig,
+                        position,
                         row["strand"],
                         row.get("control_fisher_p"),
                         json.dumps(row, sort_keys=True),
@@ -282,7 +372,9 @@ def finalize_chunks(args: argparse.Namespace) -> dict[str, Any]:
     connection = create_database(database_path)
     try:
         observed_rows = load_fragments(
-            connection, sorted(args.raw_fragment)
+            connection,
+            sorted(args.raw_fragment),
+            summaries,
         )
         if observed_rows != expected_rows:
             raise ValueError(

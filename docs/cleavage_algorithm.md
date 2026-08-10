@@ -51,17 +51,26 @@ This avoids a genome-sized endpoint dictionary.
 
 ## Parallel chunks
 
-The Nextflow workflow divides nonempty BAM contigs into a configurable number
-of chunks. Contigs are greedily balanced using mapped-record counts from the
-BAM index, and each chunk is processed by an independent one-CPU caller.
+The Nextflow workflow divides mapped BAM sequence into a configurable number
+of coordinate-based chunks. BAM index mapped-record totals define each
+contig's estimated work, and large contigs are split proportionally by genomic
+coordinate. Small contigs can share a chunk. Each chunk is processed by an
+independent one-CPU caller.
+
+Every interval has a nonoverlapping 0-based half-open ownership range and a
+larger padded scan range. Padding is derived from the configured artifact,
+nDigenome opposite-strand, and Digenome pairing neighborhoods. Chunk callers
+scan the padded range, but nDigenome calls are owned by their focal endpoint
+and Digenome calls are owned by their forward endpoint. This preserves nearby
+strand evidence across boundaries while emitting each call once.
 
 Chunk callers write intermediate JSONL rows without applying control q-values
 or final filters. A final SQLite-backed merge orders all rows, calculates
 Benjamini-Hochberg q-values across the complete sample, applies filters, and
 writes the normal TSV, BED, QC, and MultiQC outputs. Before merging, it
-requires the chunk contig sets to be nonoverlapping and to cover every mapped
-BAM contig. Contigs are never split, so opposite-strand pairing and local
-artifact windows retain their serial behavior.
+requires interval ownership to be gap-free and nonoverlapping across the full
+length of every mapped BAM contig. Candidate totals, final filtering, and
+Benjamini-Hochberg q-values therefore remain sample-wide.
 
 ## nDigenome mode
 

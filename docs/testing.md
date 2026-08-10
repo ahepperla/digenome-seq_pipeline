@@ -27,7 +27,8 @@ Coverage includes:
 - opposite-strand ranking by threshold pass and fraction
 - shared clipping, indel, VCF, control, and artifact-risk behavior
 - VCF contig compatibility and insufficient-control-coverage handling
-- complete, nonoverlapping chunk contig validation
+- complete, gap-free, nonoverlapping chunk interval validation
+- chromosome-split boundary padding and single-owner call emission
 - Fisher exact and Benjamini-Hochberg calculations
 - complete index reuse
 - FASTA fingerprint changes

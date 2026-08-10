@@ -62,6 +62,15 @@ int cleavage_chunks = params.cleavage_chunks as int
 if (cleavage_chunks < 1) {
     error "--cleavage_chunks must be at least 1"
 }
+// Cover a pair plus one-step neighboring endpoints that can compete for it.
+int digenome_chunk_context =
+    Math.abs(params.digenome_overhang as int) +
+    3 * (params.digenome_pair_window as int)
+int cleavage_chunk_padding = [
+    params.cleavage_artifact_window as int,
+    params.ndigenome_opposite_window as int,
+    digenome_chunk_context
+].max() as int
 int effective_digenome_min_mapq = keep_multimappers ?
     0 : params.digenome_min_mapq as int
 int effective_ndigenome_min_mapq = keep_multimappers ?
@@ -120,7 +129,7 @@ def container_sources = source_manifest_lines
     }
 
 def run_info = [
-    schema_version: 6,
+    schema_version: 7,
     analysis: selected_analysis,
     requested_genome: requested_genome,
     resolved_genome: selected_genome,
@@ -139,6 +148,7 @@ def run_info = [
     cleavage: [
         chunks: cleavage_chunks,
         cpus_per_chunk: 1,
+        interval_padding: cleavage_chunk_padding,
         artifact_window: params.cleavage_artifact_window,
         max_softclip_fraction: params.cleavage_max_softclip_fraction,
         max_indel_fraction: params.cleavage_max_indel_fraction,
@@ -471,9 +481,10 @@ process PLAN_CLEAVAGE_CHUNKS {
     tuple val(meta), path(bam), path(bai)
     path planner
     val chunk_count
+    val chunk_padding
 
     output:
-    tuple val(meta), path("chunk_*.contigs.txt"), emit: chunks
+    tuple val(meta), path("chunk_*.intervals.tsv"), emit: chunks
     path "${meta.sample}.cleavage_chunks.tsv", emit: plan
 
     script:
@@ -481,6 +492,7 @@ process PLAN_CLEAVAGE_CHUNKS {
     python3 ${shellQuote(planner)} \
         --bam ${shellQuote(bam)} \
         --chunks ${chunk_count} \
+        --padding ${chunk_padding} \
         --output-dir . \
         --plan ${shellQuote("${meta.sample}.cleavage_chunks.tsv")}
     """
@@ -493,7 +505,7 @@ process CLEAVAGE_CALL_CHUNK {
     tuple val(meta),
         path(bam), path(bai), path(control_bam), path(control_bai),
         path(variant_vcf), path(variant_index),
-        val(chunk_id), path(contigs_file)
+        val(chunk_id), path(intervals_file)
     path caller
 
     output:
@@ -521,7 +533,7 @@ process CLEAVAGE_CALL_CHUNK {
         ${control_args} \
         ${variant_args} \
         ${multimapper_args} \
-        --contigs-file ${shellQuote(contigs_file)} \
+        --intervals-file ${shellQuote(intervals_file)} \
         --chunk-id ${shellQuote(chunk_id)} \
         --raw-output ${shellQuote(raw_output)} \
         --summary-output ${shellQuote(summary_output)} \
@@ -786,7 +798,8 @@ workflow {
     PLAN_CLEAVAGE_CHUNKS(
         chunk_plan_requests_ch,
         chunk_planner_ch,
-        Channel.value(cleavage_chunks)
+        Channel.value(cleavage_chunks),
+        Channel.value(cleavage_chunk_padding)
     )
 
     chunk_requests_ch = cleavage_requests_ch
@@ -797,16 +810,16 @@ workflow {
             chunk_files ->
                 def files = chunk_files instanceof List ?
                     chunk_files : [chunk_files]
-                files.sort { it.name }.collect { contigs_file ->
-                    def chunk_id = contigs_file.name.replace(
-                        '.contigs.txt',
+                files.sort { it.name }.collect { intervals_file ->
+                    def chunk_id = intervals_file.name.replace(
+                        '.intervals.tsv',
                         ''
                     )
                     tuple(
                         meta, bam, bai,
                         control_bam, control_bai,
                         variant_vcf, variant_index,
-                        chunk_id, contigs_file
+                        chunk_id, intervals_file
                     )
                 }
         }

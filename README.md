@@ -161,8 +161,11 @@ The template is at `assets/samplesheet_template.csv`.
 
 Use `--cleavage_chunks 1` for serial cleavage calling. Increasing the value
 allows more caller jobs to run concurrently but does not change the calling
-rules or expected results. The planner may create fewer chunks when the BAM
-has fewer nonempty contigs.
+rules or expected results. Large chromosomes are split into coordinate
+intervals, so increasing the value can shorten a job that would otherwise
+contain one whole chromosome. The planner may create fewer chunks only when
+the mapped data and coordinate resolution cannot produce that many nonempty
+ownership ranges.
 
 Available profiles:
 
@@ -305,7 +308,8 @@ Shared outputs:
 `pipeline_info/analysis_parameters.json` records the resolved mode,
 thresholds, reference, containers, multimapper policy, and chunk settings.
 The cleavage chunk plan is stored under
-`pipeline_info/cleavage_chunks/`.
+`pipeline_info/cleavage_chunks/`. It reports each chunk's owned genomic
+intervals, estimated mapped records, and owned bases.
 
 ## Testing and production validation
 
