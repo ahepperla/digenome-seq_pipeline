@@ -65,6 +65,20 @@ class WorkflowStaticTests(unittest.TestCase):
         )[1].split("}", 1)[0]
         self.assertIn("cpus = 1", chunk_block)
 
+    def test_chunk_plan_is_joined_before_one_to_many_expansion(self) -> None:
+        main = (ROOT / "main.nf").read_text()
+        request_block = main.split(
+            "chunk_requests_ch = cleavage_requests_ch", 1
+        )[1].split("CLEAVAGE_CALL_CHUNK", 1)[0]
+
+        self.assertIn(
+            ".join(PLAN_CLEAVAGE_CHUNKS.out.chunks, by: 0)",
+            request_block,
+        )
+        self.assertIn(".flatMap", request_block)
+        self.assertIn("files.sort { it.name }.collect", request_block)
+        self.assertNotIn("planned_chunks_ch", main)
+
     def test_corrected_alignment_container_version(self) -> None:
         config = (ROOT / "nextflow.config").read_text()
         self.assertIn("bwa-mem2_v2.3_samtools_v1.22.sif", config)

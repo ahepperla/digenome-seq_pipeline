@@ -789,27 +789,26 @@ workflow {
         Channel.value(cleavage_chunks)
     )
 
-    planned_chunks_ch = PLAN_CLEAVAGE_CHUNKS.out.chunks.flatMap {
-        meta, chunk_files ->
-            def files = chunk_files instanceof List ?
-                chunk_files : [chunk_files]
-            files.collect { chunk_file ->
-                def chunk_id = chunk_file.name.replace('.contigs.txt', '')
-                tuple(meta, chunk_id, chunk_file)
-            }
-    }
-
     chunk_requests_ch = cleavage_requests_ch
-        .join(planned_chunks_ch, by: 0)
-        .map {
+        .join(PLAN_CLEAVAGE_CHUNKS.out.chunks, by: 0)
+        .flatMap {
             meta, bam, bai, control_bam, control_bai,
             variant_vcf, variant_index,
-            chunk_id, contigs_file ->
-                tuple(
-                    meta, bam, bai,
-                    control_bam, control_bai, variant_vcf, variant_index,
-                    chunk_id, contigs_file
-                )
+            chunk_files ->
+                def files = chunk_files instanceof List ?
+                    chunk_files : [chunk_files]
+                files.sort { it.name }.collect { contigs_file ->
+                    def chunk_id = contigs_file.name.replace(
+                        '.contigs.txt',
+                        ''
+                    )
+                    tuple(
+                        meta, bam, bai,
+                        control_bam, control_bai,
+                        variant_vcf, variant_index,
+                        chunk_id, contigs_file
+                    )
+                }
         }
 
     CLEAVAGE_CALL_CHUNK(chunk_requests_ch, cleavage_caller_ch)
