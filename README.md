@@ -253,7 +253,9 @@ opposite-strand support from the high-confidence SSB set.
 Output rows use:
 
 - `PASS`: retained in `*.high_confidence.tsv` and BED
-- `FILTERED`: retained only in the complete audit TSV
+- filtered rows with shared artifact evidence: retained in `*.artifact.tsv`
+- other filtered rows: retained in `*.manual_review.tsv` for user review
+- every row: retained in the complete `*.all.tsv` audit output
 
 Shared filters consider:
 
@@ -319,6 +321,8 @@ Mode-specific outputs:
 <outdir>/<analysis>/
 ├── Sample.<analysis>.all.tsv
 ├── Sample.<analysis>.high_confidence.tsv
+├── Sample.<analysis>.manual_review.tsv
+├── Sample.<analysis>.artifact.tsv
 ├── Sample.<analysis>.bed
 ├── Sample.<analysis>.qc.json
 └── Sample.<analysis>_mqc.tsv
@@ -335,11 +339,13 @@ Shared outputs:
 └── pipeline_info/
 ```
 
-`pipeline_info/analysis_parameters.json` records the resolved mode,
+`pipeline_info/preflight.ready.json` records schema validation success and
+any path-access warnings before samplesheet validation or index preparation
+can run. `pipeline_info/analysis_parameters.json` records the resolved mode,
 thresholds, reference, containers, multimapper policy, and chunk settings.
-The cleavage chunk plan is stored under
-`pipeline_info/cleavage_chunks/`. It reports each chunk's owned genomic
-intervals, estimated mapped records, and owned bases.
+The cleavage chunk plan is stored under `pipeline_info/cleavage_chunks/`. It
+reports each chunk's owned genomic intervals, callable and excluded bases,
+and estimated total and callable mapped records.
 
 ## Testing and production validation
 

@@ -21,6 +21,57 @@ def query_length(cigar: list[tuple[int, int]]) -> int:
     return sum(length for operation, length in cigar if operation in (0, 1, 4, 7, 8))
 
 
+class FilterReasonTests(unittest.TestCase):
+    def test_control_filter_reports_each_failed_criterion(self) -> None:
+        args = argparse.Namespace(
+            analysis="ndigenome",
+            max_softclip_fraction=0.20,
+            max_indel_fraction=0.20,
+            min_support_mean_mapq=10.0,
+            control_max_fraction=0.05,
+            control_min_fold=5.0,
+            control_max_q=0.05,
+        )
+        cases = {
+            "HIGH_CONTROL_FRACTION": {
+                "control_fraction": 0.10,
+                "control_fold_enrichment": 10.0,
+                "control_fisher_q": 0.01,
+            },
+            "LOW_CONTROL_FOLD": {
+                "control_fraction": 0.01,
+                "control_fold_enrichment": 2.0,
+                "control_fisher_q": 0.01,
+            },
+            "CONTROL_Q_FAIL": {
+                "control_fraction": 0.01,
+                "control_fold_enrichment": 10.0,
+                "control_fisher_q": 0.10,
+            },
+        }
+        for expected_reason, control_values in cases.items():
+            with self.subTest(expected_reason=expected_reason):
+                row = {
+                    "softclip_fraction": 0.0,
+                    "indel_fraction": 0.0,
+                    "known_indel_overlap": "",
+                    "support_mean_mapq": 60.0,
+                    "control_status": "MATCHED_CONTROL",
+                    "signal_classification": "SSB",
+                    "_caller_filter_reasons": [],
+                    **control_values,
+                }
+
+                cleavage.apply_filters_to_row(row, args)
+
+                self.assertEqual(row["classification"], "ARTIFACT_RISK")
+                self.assertEqual(row["filter_reasons"], expected_reason)
+                self.assertNotIn(
+                    "CONTROL_NOT_ENRICHED",
+                    row["filter_reasons"],
+                )
+
+
 @unittest.skipIf(pysam is None, "pysam is not installed")
 class NDigenomeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -135,6 +186,16 @@ class NDigenomeTests(unittest.TestCase):
         with path.open(newline="") as handle:
             return list(csv.DictReader(handle, delimiter="\t"))
 
+    def read_tier_rows(
+        self,
+        prefix: str,
+        tier: str,
+        analysis: str = "ndigenome",
+    ) -> list[dict[str, str]]:
+        path = self.tmp / f"{prefix}.{analysis}.{tier}.tsv"
+        with path.open(newline="") as handle:
+            return list(csv.DictReader(handle, delimiter="\t"))
+
     def test_endpoint_coordinates_include_complex_cigars(self) -> None:
         forward = self.make_read("forward", 100, [(4, 5), (0, 45)])
         reverse = self.make_read(
@@ -155,6 +216,12 @@ class NDigenomeTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["classification"], "SSB")
         self.assertEqual(rows[0]["filter_status"], "PASS")
+        self.assertEqual(
+            len(self.read_tier_rows("ssb", "high_confidence")),
+            1,
+        )
+        self.assertEqual(self.read_tier_rows("ssb", "manual_review"), [])
+        self.assertEqual(self.read_tier_rows("ssb", "artifact"), [])
 
     def test_opposite_strand_signal_is_possible_dsb(self) -> None:
         reads = [self.make_read(f"forward_{index}", 100) for index in range(8)]
@@ -242,6 +309,11 @@ class NDigenomeTests(unittest.TestCase):
         cleavage.run_serial_calling(self.args(bam, "ambiguous"))
         rows = self.read_rows("ambiguous")
         self.assertEqual(rows[0]["signal_classification"], "AMBIGUOUS")
+        self.assertEqual(
+            len(self.read_tier_rows("ambiguous", "manual_review")),
+            1,
+        )
+        self.assertEqual(self.read_tier_rows("ambiguous", "artifact"), [])
 
     def test_duplicate_secondary_and_low_mapq_reads_are_excluded(self) -> None:
         reads = [
@@ -317,6 +389,11 @@ class NDigenomeTests(unittest.TestCase):
         row = self.read_rows("softclip")[0]
         self.assertEqual(row["classification"], "ARTIFACT_RISK")
         self.assertIn("HIGH_5P_SOFTCLIP", row["filter_reasons"])
+        self.assertEqual(
+            self.read_tier_rows("softclip", "manual_review"),
+            [],
+        )
+        self.assertEqual(len(self.read_tier_rows("softclip", "artifact")), 1)
 
     def test_nearby_indel_and_vcf_are_annotated(self) -> None:
         reads = [
@@ -673,7 +750,9 @@ class NDigenomeTests(unittest.TestCase):
         row = self.read_rows("digenome_controlled", "digenome")[0]
         self.assertEqual(row["control_status"], "MATCHED_CONTROL")
         self.assertEqual(row["classification"], "ARTIFACT_RISK")
-        self.assertIn("CONTROL_NOT_ENRICHED", row["filter_reasons"])
+        self.assertIn("HIGH_CONTROL_FRACTION", row["filter_reasons"])
+        self.assertIn("LOW_CONTROL_FOLD", row["filter_reasons"])
+        self.assertIn("CONTROL_Q_FAIL", row["filter_reasons"])
 
     def test_digenome_indel_and_vcf_artifacts_are_shared(self) -> None:
         forward_cigar = [(0, 5), (1, 1), (0, 44)]

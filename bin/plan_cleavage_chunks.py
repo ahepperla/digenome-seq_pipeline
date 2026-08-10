@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import sys
 from fractions import Fraction
@@ -21,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Split mapped BAM contigs into coordinate intervals balanced by "
-            "mapped-record counts."
+            "estimated callable mapped-record counts."
         )
     )
     parser.add_argument("--bam", required=True)
@@ -35,6 +36,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _rounded_fraction(value: Fraction) -> int:
     return (value.numerator + value.denominator // 2) // value.denominator
+
+
+def _coordinate_for_callable_offset(
+    callable_segments: list[tuple[int, int]],
+    callable_offset: Fraction,
+) -> int:
+    if callable_offset <= 0:
+        return callable_segments[0][0]
+    remaining = callable_offset
+    for start, end in callable_segments:
+        segment_length = end - start
+        if remaining <= segment_length:
+            return start + _rounded_fraction(remaining)
+        remaining -= segment_length
+    return callable_segments[-1][1]
 
 
 def plan_chunks(
@@ -74,13 +90,48 @@ def plan_chunks(
     if not weighted:
         raise ValueError("BAM index reports no mapped alignments")
 
+    for item in weighted:
+        contig = str(item["contig"])
+        contig_length = int(item["length"])
+        callable_segments = (
+            genome_blacklist.subtract(contig, 0, contig_length)
+            if genome_blacklist is not None
+            else [(0, contig_length)]
+        )
+        callable_bases = sum(
+            end - start for start, end in callable_segments
+        )
+        item["callable_segments"] = callable_segments
+        item["callable_bases"] = callable_bases
+        item["callable_mapped_records"] = Fraction(
+            int(item["mapped_records"]) * callable_bases,
+            contig_length,
+        )
+
     total_mapped = sum(int(item["mapped_records"]) for item in weighted)
-    total_bases = sum(int(item["length"]) for item in weighted)
-    chunk_count = min(requested_chunks, total_mapped, total_bases)
-    boundaries = [
-        Fraction(total_mapped * index, chunk_count)
-        for index in range(1, chunk_count)
-    ]
+    total_callable_bases = sum(
+        int(item["callable_bases"]) for item in weighted
+    )
+    total_callable_weight = sum(
+        (
+            item["callable_mapped_records"]
+            for item in weighted
+        ),
+        Fraction(0),
+    )
+    if total_callable_weight > 0:
+        chunk_count = min(
+            requested_chunks,
+            total_mapped,
+            total_callable_bases,
+        )
+        boundaries = [
+            total_callable_weight * index / chunk_count
+            for index in range(1, chunk_count)
+        ]
+    else:
+        chunk_count = 1
+        boundaries = []
     chunks: list[dict[str, object]] = [
         {
             "chunk_id": index,
@@ -91,14 +142,17 @@ def plan_chunks(
         for index in range(chunk_count)
     ]
 
-    cumulative_mapped = 0
+    cumulative_callable_weight = Fraction(0)
     boundary_index = 0
     for item in weighted:
         contig = str(item["contig"])
         contig_length = int(item["length"])
         mapped_records = int(item["mapped_records"])
-        contig_start_weight = Fraction(cumulative_mapped)
-        contig_end_weight = Fraction(cumulative_mapped + mapped_records)
+        callable_segments = list(item["callable_segments"])
+        contig_start_weight = cumulative_callable_weight
+        contig_end_weight = (
+            contig_start_weight + item["callable_mapped_records"]
+        )
         cuts = [0]
 
         while (
@@ -111,12 +165,16 @@ def plan_chunks(
             scan_boundary_index < len(boundaries)
             and boundaries[scan_boundary_index] < contig_end_weight
         ):
-            offset = (
+            callable_offset = (
                 boundaries[scan_boundary_index] - contig_start_weight
             ) * contig_length / mapped_records
+            coordinate = _coordinate_for_callable_offset(
+                callable_segments,
+                callable_offset,
+            )
             coordinate = max(
                 cuts[-1] + 1,
-                min(contig_length - 1, _rounded_fraction(offset)),
+                min(contig_length - 1, coordinate),
             )
             if coordinate < contig_length:
                 cuts.append(coordinate)
@@ -139,13 +197,22 @@ def plan_chunks(
                 mapped_records * callable_bases,
                 contig_length,
             )
-            midpoint_weight = contig_start_weight + Fraction(
-                mapped_records * (start + end),
-                2 * contig_length,
+            callable_bases_before = start - (
+                genome_blacklist.overlap_bases(contig, 0, start)
+                if genome_blacklist is not None
+                else 0
             )
-            chunk_index = min(
-                chunk_count - 1,
-                int(midpoint_weight * chunk_count // total_mapped),
+            midpoint_weight = (
+                contig_start_weight
+                + Fraction(
+                    mapped_records * callable_bases_before,
+                    contig_length,
+                )
+                + callable_weight / 2
+            )
+            chunk_index = bisect.bisect_right(
+                boundaries,
+                midpoint_weight,
             )
             chunks[chunk_index]["mapped_records"] += interval_weight
             chunks[chunk_index][
@@ -162,7 +229,7 @@ def plan_chunks(
                     "excluded_bases": excluded_bases,
                 }
             )
-        cumulative_mapped += mapped_records
+        cumulative_callable_weight = contig_end_weight
 
     nonempty_chunks = [
         chunk for chunk in chunks if chunk["intervals"]

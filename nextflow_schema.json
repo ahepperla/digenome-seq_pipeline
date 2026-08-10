@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema",
+  "$id": "nextflow_schema.json",
+  "title": "Digenome-seq and nDigenome-seq pipeline parameters",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "input",
+    "genome"
+  ],
+  "properties": {
+    "max_memory": {
+      "type": "string",
+      "default": "3041.GB"
+    },
+    "max_cpus": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 256
+    },
+    "max_time": {
+      "type": "string",
+      "default": "240.h"
+    },
+    "input": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "outdir": {
+      "type": "string",
+      "minLength": 1,
+      "default": "results"
+    },
+    "genome": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "analysis": {
+      "type": "string",
+      "enum": [
+        "digenome",
+        "ndigenome"
+      ],
+      "default": "digenome"
+    },
+    "genome_blacklist": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "container_bind_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "default": []
+    },
+    "ref_cache": {
+      "type": "string",
+      "minLength": 1,
+      "default": "${projectDir}/reference_cache"
+    },
+    "index_lock_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 172800
+    },
+    "index_stale_lock_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 172800
+    },
+    "genomes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "fasta"
+        ],
+        "properties": {
+          "fasta": {
+            "type": "string",
+            "minLength": 1
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "default": {
+        "GRCh38": {
+          "fasta": "/proj/seq/data/GRCh38_GENCODE/GRCh38.primary_assembly.genome.fa",
+          "aliases": [
+            "hg38",
+            "human_hg38"
+          ]
+        },
+        "GRCh37": {
+          "fasta": "/proj/seq/data/HG19_UCSC/Sequence/WholeGenomeFasta/genome.fa",
+          "aliases": [
+            "hg19",
+            "human_hg19"
+          ]
+        },
+        "GRCm39": {
+          "fasta": "/proj/seq/data/GRCm39_GENCODE/Sequence/WholeGenomeFasta/GRCm39.primary_assembly.genome.fa",
+          "aliases": [
+            "mm39",
+            "mouse_mm39"
+          ]
+        }
+      }
+    },
+    "keep_multimappers": {
+      "type": "boolean",
+      "default": false
+    },
+    "cleavage_chunks": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 8
+    },
+    "fastp_qualified_quality_phred": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 20
+    },
+    "fastp_length_required": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 30
+    },
+    "fastp_low_complexity_filter": {
+      "type": "boolean",
+      "default": true
+    },
+    "fastp_complexity_threshold": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "default": 30
+    },
+    "fastp_extra_args": {
+      "type": "string",
+      "default": ""
+    },
+    "publish_concat_fastqs": {
+      "type": "boolean",
+      "default": false
+    },
+    "publish_trimmed_fastqs": {
+      "type": "boolean",
+      "default": false
+    },
+    "digenome_overhang": {
+      "type": "integer",
+      "default": 0
+    },
+    "digenome_pair_window": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 2
+    },
+    "digenome_min_mapq": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 1
+    },
+    "digenome_forward_cutoff": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 5
+    },
+    "digenome_reverse_cutoff": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 5
+    },
+    "digenome_depth_cutoff": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 10
+    },
+    "digenome_fraction_cutoff": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.2
+    },
+    "digenome_score_cutoff": {
+      "type": "number",
+      "minimum": 0,
+      "default": 2.5
+    },
+    "ndigenome_min_count": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 10
+    },
+    "ndigenome_min_fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.2
+    },
+    "ndigenome_min_mapq": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 1
+    },
+    "ndigenome_opposite_window": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 5
+    },
+    "ndigenome_ambiguous_min_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 3
+    },
+    "ndigenome_ambiguous_min_fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.05
+    },
+    "cleavage_artifact_window": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 10
+    },
+    "cleavage_max_softclip_fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.2
+    },
+    "cleavage_max_indel_fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.2
+    },
+    "cleavage_min_support_mean_mapq": {
+      "type": "number",
+      "minimum": 0,
+      "default": 10
+    },
+    "cleavage_control_min_depth": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1
+    },
+    "cleavage_control_max_fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.05
+    },
+    "cleavage_control_min_fold": {
+      "type": "number",
+      "minimum": 0,
+      "default": 5.0
+    },
+    "cleavage_control_max_q": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.05
+    },
+    "containers": {
+      "type": "object",
+      "required": [
+        "python",
+        "fastp",
+        "align",
+        "cleavage",
+        "multiqc"
+      ],
+      "properties": {
+        "python": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fastp": {
+          "type": "string",
+          "minLength": 1
+        },
+        "align": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cleavage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "multiqc": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      },
+      "default": {
+        "python": "${projectDir}/containers/multiqc_v1.35.sif",
+        "fastp": "${projectDir}/containers/fastp_v1.3.3.sif",
+        "align": "${projectDir}/containers/bwa-mem2_v2.3_samtools_v1.22.sif",
+        "cleavage": "${projectDir}/containers/cleavage_pysam_v0.23.3.sif",
+        "multiqc": "${projectDir}/containers/multiqc_v1.35.sif"
+      }
+    }
+  }
+}

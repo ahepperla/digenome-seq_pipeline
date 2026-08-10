@@ -8,6 +8,48 @@ def shellQuote = { value ->
     "'${value.toString().replace("'", "'\"'\"'")}'"
 }
 
+def absoluteHostPath = { value ->
+    def text = value?.toString()?.trim()
+    text ? file(text).toAbsolutePath().normalize().toString() : ''
+}
+
+def jsonSafe
+jsonSafe = { value ->
+    if (
+        value == null
+        || value instanceof Boolean
+        || value instanceof Number
+        || value instanceof String
+    ) {
+        return value
+    }
+    if (value instanceof Map) {
+        return value.collectEntries { key, item ->
+            [(key.toString()): jsonSafe(item)]
+        }
+    }
+    if (value instanceof Collection) {
+        return value.collect { jsonSafe(it) }
+    }
+    value.toString()
+}
+
+def resolvedContainer = { value ->
+    def text = value?.toString()?.trim()
+    if (
+        !text
+        || text.contains('://')
+        || (
+            !text.startsWith('/')
+            && !text.startsWith('.')
+            && !text.endsWith('.sif')
+        )
+    ) {
+        return text
+    }
+    absoluteHostPath(text)
+}
+
 def genomeLabel = { String genomeName, genomeConfig ->
     def aliases = genomeConfig.aliases ?: []
     aliases ? "${genomeName} (aliases: ${aliases.join(', ')})" : genomeName
@@ -51,15 +93,12 @@ if (!params.genome) {
 if (!params.ref_cache) {
     error "Missing required config value: params.ref_cache"
 }
+String input_path = absoluteHostPath(params.input)
+String outdir_path = absoluteHostPath(params.outdir)
+String ref_cache_path = absoluteHostPath(params.ref_cache)
 String genome_blacklist_path = params.genome_blacklist ?
-    params.genome_blacklist.toString().trim() : ''
+    absoluteHostPath(params.genome_blacklist) : ''
 boolean has_genome_blacklist = genome_blacklist_path != ''
-if (
-    has_genome_blacklist
-    && !file(genome_blacklist_path).exists()
-) {
-    error "Genome blacklist does not exist: ${genome_blacklist_path}"
-}
 
 String selected_analysis = (params.analysis ?: 'digenome').toString().toLowerCase()
 if (!(selected_analysis in ['digenome', 'ndigenome'])) {
@@ -111,9 +150,43 @@ String selected_fasta = params.genomes[selected_genome].fasta as String
 if (!selected_fasta || selected_fasta == 'null') {
     error "Genome '${selected_genome}' does not have a configured FASTA"
 }
-if (!file(selected_fasta).exists()) {
-    error "Configured FASTA for '${selected_genome}' is not visible: ${selected_fasta}"
+selected_fasta = absoluteHostPath(selected_fasta)
+
+def preflight_parameters = jsonSafe(params)
+preflight_parameters.input = input_path
+preflight_parameters.outdir = outdir_path
+preflight_parameters.ref_cache = ref_cache_path
+preflight_parameters.genome_blacklist = (
+    has_genome_blacklist ? genome_blacklist_path : null
+)
+preflight_parameters.genomes = preflight_parameters.genomes.collectEntries {
+    genome_name, genome_config ->
+        def resolved_config = new LinkedHashMap(genome_config)
+        resolved_config.fasta = absoluteHostPath(resolved_config.fasta)
+        [(genome_name): resolved_config]
 }
+preflight_parameters.containers = preflight_parameters.containers.collectEntries {
+    container_name, container_path ->
+        [(container_name): resolvedContainer(container_path)]
+}
+preflight_parameters.container_bind_paths = (
+    preflight_parameters.container_bind_paths.collect {
+        absoluteHostPath(it)
+    }
+)
+def preflight_document = [
+    parameters: preflight_parameters,
+    paths: [
+        input: input_path,
+        fasta: selected_fasta,
+        genome_blacklist: genome_blacklist_path,
+        outdir: outdir_path,
+        ref_cache: ref_cache_path
+    ]
+]
+String preflight_json = JsonOutput.prettyPrint(
+    JsonOutput.toJson(preflight_document)
+)
 
 def bundled_checksums = file("${baseDir}/containers/checksums.sha256").text
     .readLines()
@@ -138,12 +211,12 @@ def container_sources = source_manifest_lines
     }
 
 def run_info = [
-    schema_version: 8,
+    schema_version: 9,
     analysis: selected_analysis,
     requested_genome: requested_genome,
     resolved_genome: selected_genome,
     fasta: selected_fasta,
-    ref_cache: params.ref_cache as String,
+    ref_cache: ref_cache_path,
     keep_multimappers: keep_multimappers,
     genome_blacklist: genome_blacklist_path,
     multimapper_counting: [
@@ -197,6 +270,7 @@ process RUN_INFO {
 
     input:
     val run_json
+    path preflight_ready
 
     output:
     path "analysis_parameters.json"
@@ -209,6 +283,32 @@ JSON
     """
 }
 
+process PREFLIGHT {
+    tag "parameters"
+    cache false
+    publishDir "${params.outdir}/pipeline_info", mode: 'copy', overwrite: true
+
+    input:
+    val parameters_json
+    path validator
+    path schema
+
+    output:
+    path "preflight.ready.json", emit: ready
+
+    script:
+    """
+    cat > pipeline_parameters.json <<'JSON'
+${parameters_json}
+JSON
+
+    python3 ${shellQuote(validator)} \
+        --parameters pipeline_parameters.json \
+        --schema ${shellQuote(schema)} \
+        --ready preflight.ready.json
+    """
+}
+
 process VALIDATE_SAMPLESHEET {
     tag "samplesheet"
 
@@ -216,6 +316,7 @@ process VALIDATE_SAMPLESHEET {
     path samplesheet
     path validator
     val analysis
+    path preflight_ready
 
     output:
     path "samplesheet.valid.csv", emit: csv
@@ -233,6 +334,7 @@ process PREPARE_BWAMEM2_INDEX {
     input:
     tuple val(genome), val(fasta), val(ref_cache)
     path index_helper
+    path preflight_ready
 
     output:
     tuple val(genome), val(fasta), path("bwamem2_index.ready"), emit: index
@@ -601,6 +703,8 @@ process FINALIZE_CLEAVAGE_CALL {
     tuple val(meta),
         path("${meta.sample}.${selected_analysis}.all.tsv"), emit: all
     path "${meta.sample}.${selected_analysis}.high_confidence.tsv", emit: high_confidence
+    path "${meta.sample}.${selected_analysis}.manual_review.tsv", emit: manual_review
+    path "${meta.sample}.${selected_analysis}.artifact.tsv", emit: artifact
     path "${meta.sample}.${selected_analysis}.bed", emit: bed
     path "${meta.sample}.${selected_analysis}.qc.json", emit: qc
     path "${meta.sample}.${selected_analysis}_mqc.tsv", emit: multiqc
@@ -648,6 +752,12 @@ process MULTIQC {
 }
 
 workflow {
+    preflight_validator_ch = Channel.value(
+        file("${baseDir}/bin/validate_pipeline_params.py")
+    )
+    parameter_schema_ch = Channel.value(
+        file("${baseDir}/nextflow_schema.json")
+    )
     validator_ch = Channel.value(file("${baseDir}/bin/validate_samplesheet.py"))
     index_helper_ch = Channel.value(file("${baseDir}/bin/prepare_bwamem2_index.sh"))
     chunk_planner_ch = Channel.value(file("${baseDir}/bin/plan_cleavage_chunks.py"))
@@ -658,13 +768,20 @@ workflow {
     cleavage_finalizer_ch = Channel.value(
         file("${baseDir}/bin/finalize_cleavage_chunks.py")
     )
-    samplesheet_ch = Channel.fromPath(params.input, checkIfExists: true)
+    samplesheet_ch = Channel.value(file(input_path))
 
-    RUN_INFO(Channel.value(run_info_json))
+    PREFLIGHT(
+        Channel.value(preflight_json),
+        preflight_validator_ch,
+        parameter_schema_ch
+    )
+    preflight_ready_ch = PREFLIGHT.out.ready.first()
+    RUN_INFO(Channel.value(run_info_json), preflight_ready_ch)
     VALIDATE_SAMPLESHEET(
         samplesheet_ch,
         validator_ch,
-        Channel.value(selected_analysis)
+        Channel.value(selected_analysis),
+        preflight_ready_ch
     )
 
     rows_ch = VALIDATE_SAMPLESHEET.out.csv.splitCsv(header: true)
@@ -710,9 +827,13 @@ workflow {
         }
 
     genome_ch = Channel.value(
-        tuple(selected_genome, selected_fasta, params.ref_cache as String)
+        tuple(selected_genome, selected_fasta, ref_cache_path)
     )
-    PREPARE_BWAMEM2_INDEX(genome_ch, index_helper_ch)
+    PREPARE_BWAMEM2_INDEX(
+        genome_ch,
+        index_helper_ch,
+        preflight_ready_ch
+    )
 
     resolved_index_ch = PREPARE_BWAMEM2_INDEX.out.index.map {
         genome, fasta, ready ->

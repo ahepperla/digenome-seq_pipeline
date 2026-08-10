@@ -53,9 +53,11 @@ This avoids a genome-sized endpoint dictionary.
 
 The Nextflow workflow divides mapped BAM sequence into a configurable number
 of coordinate-based chunks. BAM index mapped-record totals define each
-contig's estimated work, and large contigs are split proportionally by genomic
-coordinate. Small contigs can share a chunk. Each chunk is processed by an
-independent one-CPU caller.
+contig's estimated read density. Without a blacklist, large contigs are split
+proportionally by genomic coordinate. With a blacklist, boundaries instead
+follow cumulative callable mapped work: masked spans contribute zero work and
+cuts advance across callable segments. Small contigs can share a chunk. Each
+chunk is processed by an independent one-CPU caller.
 
 Every interval has a nonoverlapping 0-based half-open ownership range and a
 larger padded scan range. Padding is derived from the configured artifact,
@@ -69,6 +71,8 @@ from each padded scan range before indexed BAM iteration. Focal nDigenome
 endpoints, Digenome forward/reverse endpoints, and nDigenome opposite-strand
 classification evidence inside the blacklist are excluded. Chunk plans report
 owned, callable, and excluded bases plus estimated callable mapped records.
+Ownership still covers every base exactly once, including masked spans, so the
+finalizer's gap and overlap checks remain unchanged.
 
 Chunk callers write intermediate JSONL rows without applying control q-values
 or final filters. A final SQLite-backed merge orders all rows, calculates
@@ -232,7 +236,9 @@ Shared artifact reasons include:
 - `KNOWN_INDEL`
 - `LOW_SUPPORT_MAPQ`
 - `INSUFFICIENT_CONTROL_COVERAGE`
-- `CONTROL_NOT_ENRICHED`
+- `HIGH_CONTROL_FRACTION`
+- `LOW_CONTROL_FOLD`
+- `CONTROL_Q_FAIL`
 
 Digenome threshold reasons are also retained in `filter_reasons`.
 nDigenome `POSSIBLE_DSB` and `AMBIGUOUS` rows are filtered from the SSB
@@ -240,7 +246,10 @@ high-confidence set.
 
 `signal_classification` records the strand interpretation.
 `classification` becomes `ARTIFACT_RISK` when shared artifact evidence is
-present. Every evaluated row remains in `*.all.tsv`.
+present. Every evaluated row remains in `*.all.tsv`. Passing rows are also
+written to `*.high_confidence.tsv`; filtered `ARTIFACT_RISK` rows go to
+`*.artifact.tsv`; all other filtered rows go to `*.manual_review.tsv` for
+user review.
 
 Default shared filters:
 
@@ -255,9 +264,10 @@ Default shared filters:
 | Matched-control fold enrichment | `< 5.0` |
 | Matched-control q-value | `> 0.05` |
 
-The three control enrichment conditions are joined by `OR`; failing any one
-adds `CONTROL_NOT_ENRICHED`. The local artifact window is 10 bp by default.
-These settings use the `cleavage_*` Nextflow parameter prefix.
+The three control enrichment conditions are evaluated independently, so a row
+can report one, two, or all three detailed reasons. The local artifact window
+is 10 bp by default. These settings use the `cleavage_*` Nextflow parameter
+prefix.
 
 ## Cutoff provenance
 

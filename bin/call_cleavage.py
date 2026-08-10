@@ -1513,12 +1513,13 @@ def apply_filters_to_row(
         artifact_reasons.append("LOW_SUPPORT_MAPQ")
     if row["control_status"] == "INSUFFICIENT_CONTROL_COVERAGE":
         artifact_reasons.append("INSUFFICIENT_CONTROL_COVERAGE")
-    if row["control_status"] == "MATCHED_CONTROL" and (
-        row["control_fraction"] > args.control_max_fraction
-        or row["control_fold_enrichment"] < args.control_min_fold
-        or row["control_fisher_q"] > args.control_max_q
-    ):
-        artifact_reasons.append("CONTROL_NOT_ENRICHED")
+    if row["control_status"] == "MATCHED_CONTROL":
+        if row["control_fraction"] > args.control_max_fraction:
+            artifact_reasons.append("HIGH_CONTROL_FRACTION")
+        if row["control_fold_enrichment"] < args.control_min_fold:
+            artifact_reasons.append("LOW_CONTROL_FOLD")
+        if row["control_fisher_q"] > args.control_max_q:
+            artifact_reasons.append("CONTROL_Q_FAIL")
 
     row["classification"] = (
         "ARTIFACT_RISK"
@@ -1571,6 +1572,8 @@ def write_output_stream(
     stem = f"{output_prefix}.{args.analysis}"
     all_path = Path(f"{stem}.all.tsv")
     high_path = Path(f"{stem}.high_confidence.tsv")
+    manual_review_path = Path(f"{stem}.manual_review.tsv")
+    artifact_path = Path(f"{stem}.artifact.tsv")
     bed_path = Path(f"{stem}.bed")
     qc_path = Path(f"{stem}.qc.json")
     multiqc_path = Path(f"{output_prefix}.{args.analysis}_mqc.tsv")
@@ -1579,10 +1582,14 @@ def write_output_stream(
     signal_counts: Counter[str] = Counter()
     reported_count = 0
     high_confidence_count = 0
+    manual_review_count = 0
+    artifact_count = 0
 
     with (
         all_path.open("w", newline="") as all_handle,
         high_path.open("w", newline="") as high_handle,
+        manual_review_path.open("w", newline="") as manual_review_handle,
+        artifact_path.open("w", newline="") as artifact_handle,
         bed_path.open("w") as bed_handle,
     ):
         all_writer = csv.DictWriter(
@@ -1599,8 +1606,24 @@ def write_output_stream(
             lineterminator="\n",
             extrasaction="ignore",
         )
+        manual_review_writer = csv.DictWriter(
+            manual_review_handle,
+            fieldnames=TSV_FIELDS,
+            delimiter="\t",
+            lineterminator="\n",
+            extrasaction="ignore",
+        )
+        artifact_writer = csv.DictWriter(
+            artifact_handle,
+            fieldnames=TSV_FIELDS,
+            delimiter="\t",
+            lineterminator="\n",
+            extrasaction="ignore",
+        )
         all_writer.writeheader()
         high_writer.writeheader()
+        manual_review_writer.writeheader()
+        artifact_writer.writeheader()
 
         for row in rows:
             reported_count += 1
@@ -1625,9 +1648,15 @@ def write_output_stream(
                     f"{row['position_0based'] + 1}\t{name}\t{score}\t"
                     f"{'.' if row['strand'] == 'both' else row['strand']}\n"
                 )
+            elif row["classification"] == "ARTIFACT_RISK":
+                artifact_count += 1
+                artifact_writer.writerow(formatted)
+            else:
+                manual_review_count += 1
+                manual_review_writer.writerow(formatted)
 
     qc = {
-        "schema_version": 4,
+        "schema_version": 5,
         "sample": args.sample,
         "analysis": args.analysis,
         "control_status": (
@@ -1673,6 +1702,8 @@ def write_output_stream(
         "candidate_endpoints_or_pairs_before_filters": candidate_count,
         "reported_candidates": reported_count,
         "high_confidence_calls": high_confidence_count,
+        "manual_review_candidates": manual_review_count,
+        "artifact_candidates": artifact_count,
         "high_confidence_ssb": (
             high_confidence_count if args.analysis == "ndigenome" else 0
         ),
@@ -1697,15 +1728,16 @@ def write_output_stream(
         handle.write("# plot_type: table\n")
         handle.write(
             "Sample\tReported candidates\tHigh-confidence calls\t"
-            "DSB\tSSB\tPossible DSB\tAmbiguous\tArtifact risk\n"
+            "Manual-review candidates\tArtifact candidates\t"
+            "DSB\tSSB\tPossible DSB\tAmbiguous\n"
         )
         handle.write(
             f"{args.sample}\t{reported_count}\t{high_confidence_count}\t"
+            f"{manual_review_count}\t{artifact_count}\t"
             f"{signal_counts.get('DSB', 0)}\t"
             f"{signal_counts.get('SSB', 0)}\t"
             f"{signal_counts.get('POSSIBLE_DSB', 0)}\t"
-            f"{signal_counts.get('AMBIGUOUS', 0)}\t"
-            f"{classification_counts.get('ARTIFACT_RISK', 0)}\n"
+            f"{signal_counts.get('AMBIGUOUS', 0)}\n"
         )
     return qc
 

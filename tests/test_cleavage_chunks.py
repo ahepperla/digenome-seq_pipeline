@@ -312,6 +312,87 @@ class CleavageChunkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overlapping"):
             cleavage.read_intervals_file(str(intervals))
 
+    def test_planner_balances_blacklist_adjusted_callable_work(self) -> None:
+        reads = [
+            self.make_read(
+                f"chr1_{index}",
+                0,
+                100 + index,
+            )
+            for index in range(100)
+        ]
+        reads += [
+            self.make_read(
+                f"chr2_{index}",
+                1,
+                100 + index,
+            )
+            for index in range(100)
+        ]
+        bam = self.write_bam("callable_balance", reads)
+        blacklist = self.tmp / "callable_balance.bed"
+        blacklist.write_text("chr1\t0\t1800\n")
+
+        chunks = planner.plan_chunks(
+            str(bam),
+            2,
+            genome_blacklist_path=str(blacklist),
+        )
+
+        self.assertEqual(
+            [chunk["callable_mapped_records"] for chunk in chunks],
+            [55, 55],
+        )
+        self.assertEqual(
+            [chunk["mapped_records"] for chunk in chunks],
+            [145, 55],
+        )
+        self.assertEqual(
+            [
+                (interval["contig"], interval["start"], interval["end"])
+                for chunk in chunks
+                for interval in chunk["intervals"]
+            ],
+            [
+                ("chr1", 0, 2000),
+                ("chr2", 0, 900),
+                ("chr2", 900, 2000),
+            ],
+        )
+
+    def test_planner_handles_fully_blacklisted_mapped_contigs(self) -> None:
+        reads = [
+            self.make_read(f"read_{index}", 0, 100 + index)
+            for index in range(10)
+        ]
+        bam = self.write_bam("fully_blacklisted", reads)
+        blacklist = self.tmp / "fully_blacklisted.bed"
+        blacklist.write_text("chr1\t0\t2000\n")
+
+        chunks = planner.plan_chunks(
+            str(bam),
+            8,
+            genome_blacklist_path=str(blacklist),
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["mapped_records"], 10)
+        self.assertEqual(chunks[0]["callable_mapped_records"], 0)
+        self.assertEqual(
+            chunks[0]["intervals"],
+            [
+                {
+                    "contig": "chr1",
+                    "start": 0,
+                    "end": 2000,
+                    "scan_start": 0,
+                    "scan_end": 2000,
+                    "callable_bases": 0,
+                    "excluded_bases": 2000,
+                }
+            ],
+        )
+
     def test_finalizer_rejects_missing_chunk_intervals(self) -> None:
         summary = self.tmp / "missing.chunk.json"
         summary.write_text(
@@ -644,6 +725,8 @@ class CleavageChunkTests(unittest.TestCase):
             suffixes = [
                 f".{analysis}.all.tsv",
                 f".{analysis}.high_confidence.tsv",
+                f".{analysis}.manual_review.tsv",
+                f".{analysis}.artifact.tsv",
                 f".{analysis}.bed",
                 f".{analysis}_mqc.tsv",
             ]
@@ -658,10 +741,18 @@ class CleavageChunkTests(unittest.TestCase):
                 "candidate_endpoints_or_pairs_before_filters",
                 "reported_candidates",
                 "high_confidence_calls",
+                "manual_review_candidates",
+                "artifact_candidates",
                 "classifications",
                 "signal_classifications",
             ):
                 self.assertEqual(serial_qc[key], chunked_qc[key], key)
+            self.assertEqual(
+                chunked_qc["reported_candidates"],
+                chunked_qc["high_confidence_calls"]
+                + chunked_qc["manual_review_candidates"]
+                + chunked_qc["artifact_candidates"],
+            )
 
             with Path(
                 f"{chunked_prefix}.{analysis}.all.tsv"

@@ -26,11 +26,14 @@ Coverage includes:
 - nDigenome SSB, possible DSB, and ambiguous calls
 - opposite-strand ranking by threshold pass and fraction
 - shared clipping, indel, VCF, control, and artifact-risk behavior
+- detailed matched-control filter reasons and candidate output tiers
 - VCF contig compatibility and insufficient-control-coverage handling
 - complete, gap-free, nonoverlapping chunk interval validation
 - chromosome-split boundary padding and single-owner call emission
+- blacklist-adjusted callable-work balancing, including fully masked contigs
 - optional BED/BED.gz blacklist parsing, validation, provenance, and scanning
 - Fisher exact and Benjamini-Hochberg calculations
+- parameter schema coverage and preflight path/configuration validation
 - complete index reuse
 - FASTA fingerprint changes
 - partial index quarantine

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from collections import Counter
+import json
 import re
 import unittest
 from pathlib import Path
@@ -27,6 +28,22 @@ class WorkflowStaticTests(unittest.TestCase):
         self.assertIn("process PLAN_CLEAVAGE_CHUNKS", main)
         self.assertIn("process CLEAVAGE_CALL_CHUNK", main)
         self.assertIn("process FINALIZE_CLEAVAGE_CALL", main)
+        self.assertIn("process PREFLIGHT", main)
+        preflight_block = main.split(
+            "process PREFLIGHT", 1
+        )[1].split("process VALIDATE_SAMPLESHEET", 1)[0]
+        self.assertIn("cache false", preflight_block)
+        self.assertIn("preflight_ready_ch = PREFLIGHT.out.ready.first()", main)
+        self.assertEqual(main.count("preflight_ready_ch"), 4)
+        self.assertIn("withName: PREFLIGHT", base)
+        self.assertIn(
+            'path "${meta.sample}.${selected_analysis}.manual_review.tsv"',
+            main,
+        )
+        self.assertIn(
+            'path "${meta.sample}.${selected_analysis}.artifact.tsv"',
+            main,
+        )
         self.assertNotIn("process CLEAVAGE_CALL {", main)
         self.assertNotIn("process NDIGENOME_CALL", main)
         self.assertNotIn("process DIGENOME_DSB", main)
@@ -82,6 +99,9 @@ class WorkflowStaticTests(unittest.TestCase):
         config = (ROOT / "nextflow.config").read_text()
         reference = (ROOT / "docs" / "parameters.md").read_text()
         readme = (ROOT / "README.md").read_text()
+        schema = json.loads(
+            (ROOT / "nextflow_schema.json").read_text()
+        )
         params_block = config.split("params {", 1)[1].split("\n}", 1)[0]
         configured = set(
             re.findall(
@@ -96,9 +116,13 @@ class WorkflowStaticTests(unittest.TestCase):
             flags=re.MULTILINE,
         )
         documented = set(documented_names)
+        schema_names = set(schema["properties"])
 
         self.assertEqual(documented, configured)
+        self.assertEqual(schema_names, configured)
         self.assertEqual(len(documented_names), len(documented))
+        self.assertEqual(schema["required"], ["input", "genome"])
+        self.assertFalse(schema["additionalProperties"])
         for line in reference.splitlines():
             if re.match(
                 r"^\| `(?:--|params\.)[a-z][a-z0-9_]*` \|",

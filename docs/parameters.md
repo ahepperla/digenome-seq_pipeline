@@ -16,6 +16,13 @@ Boolean parameters can be enabled by name, such as `--keep_multimappers`, or
 set explicitly with `true` or `false`. Quote paths and free-form strings when
 they contain spaces.
 
+`nextflow_schema.json` defines every accepted pipeline parameter, type,
+default, required value, choice, and numeric range. A preflight task rejects
+unknown parameters and invalid values, checks configured input/reference/
+blacklist/container/bind paths, and checks output/cache accessibility before
+samplesheet validation or reference-index preparation can begin. Its report
+is published as `<outdir>/pipeline_info/preflight.ready.json`.
+
 ## Required inputs and references
 
 | Parameter | Type | Default | Required | Description |
@@ -40,14 +47,15 @@ they contain spaces.
 | `--max_cpus` | Integer | `256` | SLURM profiles | Executor-wide CPU cap, not the CPU request for an individual task. |
 | `--max_time` | Duration | `240.h` | SLURM profiles | Executor-wide wall-time cap. Individual process limits remain defined in `conf/base.config`. |
 | `--keep_multimappers` | Boolean | `false` | Both modes | Runs bwa-mem2 with `-a`, permits MAPQ 0 primary alignments, sets both caller minimum MAPQ values to 0, disables the support mean-MAPQ filter, and disables fastp low-complexity filtering. Secondary and supplementary alignments remain diagnostic only and are not counted as independent cleavage support. |
-| `--cleavage_chunks` | Integer | `8` | Both modes | Requested coordinate chunks per sample and maximum concurrent cleavage-caller tasks. Each caller uses one CPU. The planner can emit fewer nonempty chunks when the data cannot support the requested count. |
+| `--cleavage_chunks` | Integer | `8` | Both modes | Requested coordinate chunks per sample and maximum concurrent cleavage-caller tasks. Each caller uses one CPU. Work estimates exclude supplied blacklist bases, so masked spans do not consume chunk capacity. The planner can emit fewer nonempty chunks when the callable data cannot support the requested count. |
 | `--publish_concat_fastqs` | Boolean | `false` | Both modes | Copies lane-concatenated FASTQs to `<outdir>/concat_fastqs`. Concatenated files are always created in work storage for downstream processing. |
 | `--publish_trimmed_fastqs` | Boolean | `false` | Both modes | Copies fastp-trimmed FASTQs to `<outdir>/trimmed_fastqs`. Trimmed files are always created in work storage for alignment. |
 
 Chunk ownership is complete, gap-free, and nonoverlapping. Each chunk scans a
 padded region so nearby strand evidence is preserved, but each call has one
 owner. Final filtering and Benjamini-Hochberg q-values are calculated across
-the complete sample after all chunks are merged.
+the complete sample after all chunks are merged. Blacklisted spans remain in
+the ownership map for continuity, but contribute zero estimated callable work.
 
 ## fastp preprocessing
 
@@ -133,17 +141,21 @@ Only unfiltered `SSB` rows enter the high-confidence nDigenome output.
 | `--cleavage_max_indel_fraction` | Fraction | `0.20` | Local indel fraction `>=` value | Adds `NEARBY_INDEL` when the fraction of local primary alignments with a nearby CIGAR indel reaches this value. |
 | `--cleavage_min_support_mean_mapq` | Number | `10` | Mean MAPQ `<` value | Adds `LOW_SUPPORT_MAPQ` when the mean MAPQ of supporting endpoint reads is below this value. Automatically becomes `0` with `--keep_multimappers`. |
 | `--cleavage_control_min_depth` | Integer count | `1` | Control depth `<` value | Adds `INSUFFICIENT_CONTROL_COVERAGE` when matched-control strand depth is below this value. It has no effect when no matched control is supplied. |
-| `--cleavage_control_max_fraction` | Fraction | `0.05` | Control fraction `>` value | One of three independent conditions that can add `CONTROL_NOT_ENRICHED`. Equality passes. |
-| `--cleavage_control_min_fold` | Number | `5.0` | Fold enrichment `<` value | Requires the pseudocount-adjusted treated endpoint rate to be sufficiently enriched over control. Equality passes. |
-| `--cleavage_control_max_q` | Fraction | `0.05` | Fisher q-value `>` value | Maximum sample-wide Benjamini-Hochberg-adjusted matched-control Fisher value. Equality passes. |
+| `--cleavage_control_max_fraction` | Fraction | `0.05` | Control fraction `>` value | Adds `HIGH_CONTROL_FRACTION`. Equality passes. |
+| `--cleavage_control_min_fold` | Number | `5.0` | Fold enrichment `<` value | Adds `LOW_CONTROL_FOLD` when the pseudocount-adjusted treated endpoint rate is not sufficiently enriched over control. Equality passes. |
+| `--cleavage_control_max_q` | Fraction | `0.05` | Fisher q-value `>` value | Adds `CONTROL_Q_FAIL` when the sample-wide Benjamini-Hochberg-adjusted matched-control Fisher value exceeds this threshold. Equality passes. |
 
-For matched controls, `CONTROL_NOT_ENRICHED` is added when any of these is
-true:
+For matched controls, each failed condition is reported independently:
 
 ```text
-control_fraction > cleavage_control_max_fraction
-OR treated/control fold < cleavage_control_min_fold
-OR control_fisher_q > cleavage_control_max_q
+HIGH_CONTROL_FRACTION:
+    control_fraction > cleavage_control_max_fraction
+
+LOW_CONTROL_FOLD:
+    treated/control fold < cleavage_control_min_fold
+
+CONTROL_Q_FAIL:
+    control_fisher_q > cleavage_control_max_q
 ```
 
 The fold enrichment uses:
