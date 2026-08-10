@@ -5,11 +5,11 @@ launch nested container runtimes.
 
 ## Image location
 
-SIF files are excluded from Git because of their size. The shared Longleaf
+SIF files are excluded from Git because of their size. Each complete
 installation stores the validated images in:
 
 ```text
-/proj/jmsimon/Zylka/digenome-seq_pipeline/containers
+<pipeline-directory>/containers
 ```
 
 Nextflow expects the files below in the `containers/` directory of whichever

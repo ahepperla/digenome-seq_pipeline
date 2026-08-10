@@ -239,7 +239,7 @@ process PREPARE_BWAMEM2_INDEX {
 
     script:
     """
-    ${shellQuote(index_helper)} \
+    bash ${shellQuote(index_helper)} \
         --genome ${shellQuote(genome)} \
         --fasta ${shellQuote(fasta)} \
         --cache-dir ${shellQuote(ref_cache)} \

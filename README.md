@@ -25,11 +25,11 @@ The `longleaf` profile expects:
 The containers provide Python, pysam, bwa-mem2, samtools, fastp, and MultiQC.
 No Python module or virtual environment is required.
 
-The GitHub repository does not include the large SIF files. The shared
-Longleaf installation keeps the validated images here:
+The GitHub repository does not include the large SIF files. A complete
+Longleaf installation keeps the validated images under its own checkout:
 
 ```text
-/proj/jmsimon/Zylka/digenome-seq_pipeline/containers
+<pipeline-directory>/containers
 ```
 
 The pipeline looks for images in the `containers/` directory of the checkout
@@ -47,7 +47,7 @@ test -r /proj/seq/data/GRCh38_GENCODE/GRCh38.primary_assembly.genome.fa
 Verify the shared Longleaf containers:
 
 ```bash
-cd /proj/jmsimon/Zylka/digenome-seq_pipeline/containers
+cd /path/to/digenome-seq_pipeline/containers
 sha256sum -c checksums.sha256
 ```
 
@@ -55,7 +55,7 @@ Build the unified cleavage image only when it is missing or intentionally
 being replaced:
 
 ```bash
-cd /proj/jmsimon/Zylka/digenome-seq_pipeline
+cd /path/to/digenome-seq_pipeline
 ./containers/build_cleavage.sh
 ```
 
@@ -64,7 +64,7 @@ cd /proj/jmsimon/Zylka/digenome-seq_pipeline
 Run Digenome-seq:
 
 ```bash
-nextflow run /proj/jmsimon/Zylka/digenome-seq_pipeline \
+nextflow run /path/to/digenome-seq_pipeline \
   -profile longleaf \
   --input samplesheet.csv \
   --genome hg38 \
@@ -76,7 +76,7 @@ nextflow run /proj/jmsimon/Zylka/digenome-seq_pipeline \
 Run nDigenome-seq with repetitive-region support and 16 cleavage callers:
 
 ```bash
-nextflow run /proj/jmsimon/Zylka/digenome-seq_pipeline \
+nextflow run /path/to/digenome-seq_pipeline \
   -profile longleaf \
   --input samplesheet.csv \
   --genome hg38 \
@@ -296,10 +296,10 @@ bwa-mem2 indexes are stored under:
 <ref_cache>/<genome>/<fasta_sha256>/bwamem2/
 ```
 
-On Longleaf the default cache is:
+By default the cache is relative to the checkout being run:
 
 ```text
-/proj/jmsimon/Zylka/digenome-seq_pipeline/reference_cache
+<pipeline-directory>/reference_cache
 ```
 
 The SHA-256 is calculated from the complete FASTA. A future run reuses an

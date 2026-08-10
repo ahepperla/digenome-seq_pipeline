@@ -142,9 +142,23 @@ class WorkflowStaticTests(unittest.TestCase):
     def test_longleaf_profile_is_explicit(self) -> None:
         config = (ROOT / "nextflow.config").read_text()
         longleaf = (ROOT / "conf" / "longleaf.config").read_text()
+        main = (ROOT / "main.nf").read_text()
         self.assertIn("longleaf {", config)
         for bind_path in ("/proj", "/work", "/users", "/overflow", "/nas"):
             self.assertIn(f"--bind {bind_path}", longleaf)
+        self.assertNotIn(
+            "/proj/jmsimon/Zylka/digenome-seq_pipeline",
+            longleaf,
+        )
+        self.assertIn(
+            'ref_cache = "${projectDir}/reference_cache"',
+            longleaf,
+        )
+        self.assertIn(
+            'cacheDir = "${projectDir}/containers"',
+            longleaf,
+        )
+        self.assertIn("bash ${shellQuote(index_helper)}", main)
 
     def test_cleavage_definition_uses_apptainer_compatible_digest(self) -> None:
         definition = (
