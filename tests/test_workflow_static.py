@@ -61,6 +61,10 @@ class WorkflowStaticTests(unittest.TestCase):
         )
         self.assertIn("--padding ${chunk_padding}", main)
         self.assertIn("--intervals-file", main)
+        self.assertIn("genome_blacklist = null", config)
+        self.assertIn("--genome-blacklist", main)
+        self.assertIn("genome_blacklist_ch", main)
+        self.assertIn("bin/genome_blacklist.py", main)
         self.assertIn('path("chunk_*.intervals.tsv")', main)
         self.assertIn("withName: CLEAVAGE_CALL_CHUNK", base)
         self.assertIn(

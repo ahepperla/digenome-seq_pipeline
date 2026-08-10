@@ -195,6 +195,7 @@ class CleavageChunkTests(unittest.TestCase):
             control_bam=str(control),
             control_sample="Control",
             variant_vcf=str(vcf),
+            genome_blacklist="",
             keep_multimappers=True,
             intervals_file=None,
             chunk_id=None,
@@ -283,6 +284,23 @@ class CleavageChunkTests(unittest.TestCase):
         )
         self.assertEqual(intervals[0].scan_start, 0)
         self.assertEqual(intervals[0].scan_end, 2000)
+
+        blacklist = self.tmp / "planner_blacklist.bed"
+        blacklist.write_text("chr1\t100\t200\n")
+        masked_chunks = planner.plan_chunks(
+            str(bam),
+            2,
+            padding=10,
+            genome_blacklist_path=str(blacklist),
+        )
+        self.assertEqual(
+            sum(
+                interval["excluded_bases"]
+                for chunk in masked_chunks
+                for interval in chunk["intervals"]
+            ),
+            100,
+        )
 
     def test_overlapping_owned_intervals_are_rejected(self) -> None:
         intervals = self.tmp / "overlap.intervals.tsv"
@@ -561,8 +579,15 @@ class CleavageChunkTests(unittest.TestCase):
         treated = self.write_bam("treated", treated_reads)
         control = self.write_bam("control", control_reads)
         vcf = self.write_variant_vcf()
+        blacklist = self.tmp / "genome_blacklist.bed"
+        blacklist.write_text("chr1\t490\t510\n")
 
-        chunks = planner.plan_chunks(str(treated), 4, padding=10)
+        chunks = planner.plan_chunks(
+            str(treated),
+            4,
+            padding=10,
+            genome_blacklist_path=str(blacklist),
+        )
         plan_dir = self.tmp / "chunk_plan"
         planner.write_plan(chunks, plan_dir, self.tmp / "chunk_plan.tsv")
         interval_files = sorted(plan_dir.glob("*.intervals.tsv"))
@@ -570,15 +595,15 @@ class CleavageChunkTests(unittest.TestCase):
         for analysis in ("digenome", "ndigenome"):
             serial_prefix = self.tmp / f"serial_{analysis}"
             chunked_prefix = self.tmp / f"chunked_{analysis}"
-            serial_qc = cleavage.run_serial_calling(
-                self.caller_args(
-                    treated,
-                    control,
-                    vcf,
-                    serial_prefix,
-                    analysis,
-                )
+            serial_args = self.caller_args(
+                treated,
+                control,
+                vcf,
+                serial_prefix,
+                analysis,
             )
+            serial_args.genome_blacklist = str(blacklist)
+            serial_qc = cleavage.run_serial_calling(serial_args)
 
             raw_fragments = []
             summaries = []
@@ -597,6 +622,7 @@ class CleavageChunkTests(unittest.TestCase):
                     chunked_prefix,
                     analysis,
                 )
+                args.genome_blacklist = str(blacklist)
                 args.intervals_file = str(interval_file)
                 args.chunk_id = chunk_id
                 args.raw_output = str(raw_path)
@@ -650,6 +676,29 @@ class CleavageChunkTests(unittest.TestCase):
             qc_path = Path(f"{chunked_prefix}.{analysis}.qc.json")
             qc_document = json.loads(qc_path.read_text())
             self.assertEqual(qc_document["parameters"]["cleavage_chunks"], 4)
+            self.assertEqual(
+                qc_document["genome_blacklist"]["excluded_bases"],
+                20,
+            )
+            self.assertEqual(
+                qc_document["genome_blacklist"]["intervals"],
+                1,
+            )
+            self.assertEqual(
+                qc_document["genome_blacklist"]["sha256"],
+                serial_qc["genome_blacklist"]["sha256"],
+            )
+            with Path(
+                f"{chunked_prefix}.{analysis}.all.tsv"
+            ).open(newline="") as handle:
+                blacklisted_rows = list(
+                    csv.DictReader(handle, delimiter="\t")
+                )
+            self.assertTrue(blacklisted_rows)
+            self.assertNotIn(
+                "chr1",
+                {row["contig"] for row in blacklisted_rows},
+            )
 
 
 if __name__ == "__main__":

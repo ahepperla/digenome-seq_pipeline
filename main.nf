@@ -51,6 +51,15 @@ if (!params.genome) {
 if (!params.ref_cache) {
     error "Missing required config value: params.ref_cache"
 }
+String genome_blacklist_path = params.genome_blacklist ?
+    params.genome_blacklist.toString().trim() : ''
+boolean has_genome_blacklist = genome_blacklist_path != ''
+if (
+    has_genome_blacklist
+    && !file(genome_blacklist_path).exists()
+) {
+    error "Genome blacklist does not exist: ${genome_blacklist_path}"
+}
 
 String selected_analysis = (params.analysis ?: 'digenome').toString().toLowerCase()
 if (!(selected_analysis in ['digenome', 'ndigenome'])) {
@@ -129,13 +138,14 @@ def container_sources = source_manifest_lines
     }
 
 def run_info = [
-    schema_version: 7,
+    schema_version: 8,
     analysis: selected_analysis,
     requested_genome: requested_genome,
     resolved_genome: selected_genome,
     fasta: selected_fasta,
     ref_cache: params.ref_cache as String,
     keep_multimappers: keep_multimappers,
+    genome_blacklist: genome_blacklist_path,
     multimapper_counting: [
         primary_alignments: 'counted_once_at_the_bwa_selected_primary_placement',
         secondary_and_supplementary_alignments: 'diagnostic_only'
@@ -480,6 +490,9 @@ process PLAN_CLEAVAGE_CHUNKS {
     input:
     tuple val(meta), path(bam), path(bai)
     path planner
+    path blacklist_helper
+    path genome_blacklist
+    val blacklist_enabled
     val chunk_count
     val chunk_padding
 
@@ -488,11 +501,14 @@ process PLAN_CLEAVAGE_CHUNKS {
     path "${meta.sample}.cleavage_chunks.tsv", emit: plan
 
     script:
+    def blacklist_args = blacklist_enabled ?
+        "--genome-blacklist ${shellQuote(genome_blacklist)}" : ''
     """
     python3 ${shellQuote(planner)} \
         --bam ${shellQuote(bam)} \
         --chunks ${chunk_count} \
         --padding ${chunk_padding} \
+        ${blacklist_args} \
         --output-dir . \
         --plan ${shellQuote("${meta.sample}.cleavage_chunks.tsv")}
     """
@@ -507,6 +523,9 @@ process CLEAVAGE_CALL_CHUNK {
         path(variant_vcf), path(variant_index),
         val(chunk_id), path(intervals_file)
     path caller
+    path blacklist_helper
+    path genome_blacklist
+    val blacklist_enabled
 
     output:
     tuple val(meta),
@@ -524,6 +543,8 @@ process CLEAVAGE_CALL_CHUNK {
         "--variant-vcf ${shellQuote(variant_vcf)}"
         : ''
     def multimapper_args = keep_multimappers ? '--keep-multimappers' : ''
+    def blacklist_args = blacklist_enabled ?
+        "--genome-blacklist ${shellQuote(genome_blacklist)}" : ''
     """
     python3 ${shellQuote(caller)} \
         --analysis ${shellQuote(selected_analysis)} \
@@ -533,6 +554,7 @@ process CLEAVAGE_CALL_CHUNK {
         ${control_args} \
         ${variant_args} \
         ${multimapper_args} \
+        ${blacklist_args} \
         --intervals-file ${shellQuote(intervals_file)} \
         --chunk-id ${shellQuote(chunk_id)} \
         --raw-output ${shellQuote(raw_output)} \
@@ -573,6 +595,7 @@ process FINALIZE_CLEAVAGE_CALL {
     tuple val(meta), path(raw_fragments), path(chunk_summaries)
     path finalizer
     path caller
+    path blacklist_helper
 
     output:
     tuple val(meta),
@@ -628,6 +651,9 @@ workflow {
     validator_ch = Channel.value(file("${baseDir}/bin/validate_samplesheet.py"))
     index_helper_ch = Channel.value(file("${baseDir}/bin/prepare_bwamem2_index.sh"))
     chunk_planner_ch = Channel.value(file("${baseDir}/bin/plan_cleavage_chunks.py"))
+    blacklist_helper_ch = Channel.value(
+        file("${baseDir}/bin/genome_blacklist.py")
+    )
     cleavage_caller_ch = Channel.value(file("${baseDir}/bin/call_cleavage.py"))
     cleavage_finalizer_ch = Channel.value(
         file("${baseDir}/bin/finalize_cleavage_chunks.py")
@@ -736,6 +762,11 @@ workflow {
     no_control_bai = file("${baseDir}/assets/NO_CONTROL.bam.bai")
     no_variant_vcf = file("${baseDir}/assets/NO_VARIANT.vcf.gz")
     no_variant_index = file("${baseDir}/assets/NO_VARIANT.vcf.gz.tbi")
+    no_genome_blacklist = file("${baseDir}/assets/NO_BLACKLIST.bed")
+    genome_blacklist_ch = Channel.value(
+        has_genome_blacklist ?
+            file(genome_blacklist_path) : no_genome_blacklist
+    )
 
     aligned_bam_ch = ALIGN_MARKDUP_PE.out.bam.mix(ALIGN_MARKDUP_SE.out.bam)
     bam_type_ch = aligned_bam_ch.branch {
@@ -798,6 +829,9 @@ workflow {
     PLAN_CLEAVAGE_CHUNKS(
         chunk_plan_requests_ch,
         chunk_planner_ch,
+        blacklist_helper_ch,
+        genome_blacklist_ch,
+        Channel.value(has_genome_blacklist),
         Channel.value(cleavage_chunks),
         Channel.value(cleavage_chunk_padding)
     )
@@ -824,12 +858,19 @@ workflow {
                 }
         }
 
-    CLEAVAGE_CALL_CHUNK(chunk_requests_ch, cleavage_caller_ch)
+    CLEAVAGE_CALL_CHUNK(
+        chunk_requests_ch,
+        cleavage_caller_ch,
+        blacklist_helper_ch,
+        genome_blacklist_ch,
+        Channel.value(has_genome_blacklist)
+    )
     finalize_requests_ch = CLEAVAGE_CALL_CHUNK.out.chunks.groupTuple()
     FINALIZE_CLEAVAGE_CALL(
         finalize_requests_ch,
         cleavage_finalizer_ch,
-        cleavage_caller_ch
+        cleavage_caller_ch,
+        blacklist_helper_ch
     )
     qc_ch = qc_ch.mix(FINALIZE_CLEAVAGE_CALL.out.multiqc)
 

@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from genome_blacklist import GenomeBlacklist, load_genome_blacklist
+
 try:
     import pysam
 except ImportError:  # pragma: no cover - exercised by the command-line guard
@@ -195,6 +197,7 @@ def scan_candidate_endpoints(
     min_mapq: int,
     contigs: Iterable[str] | None = None,
     intervals: Iterable[GenomicInterval] | None = None,
+    genome_blacklist: GenomeBlacklist | None = None,
 ) -> list[tuple[str, int, str, int]]:
     """Stream a coordinate-sorted BAM and retain endpoint runs above cutoff."""
     if contigs is not None and intervals is not None:
@@ -231,58 +234,73 @@ def scan_candidate_endpoints(
     candidates: dict[tuple[str, int, str], int] = {}
     for interval in selected_intervals:
         contig = interval.contig
-        forward_position: int | None = None
-        forward_count = 0
-        reverse_counts: dict[int, int] = {}
-        reverse_heap: list[int] = []
-        previous_start = -1
+        scan_regions = (
+            genome_blacklist.subtract(
+                contig,
+                interval.scan_start,
+                interval.scan_end,
+            )
+            if genome_blacklist is not None
+            else [(interval.scan_start, interval.scan_end)]
+        )
+        for scan_start, scan_end in scan_regions:
+            forward_position: int | None = None
+            forward_count = 0
+            reverse_counts: dict[int, int] = {}
+            reverse_heap: list[int] = []
+            previous_start = -1
 
-        def save_forward() -> None:
-            if forward_position is not None and forward_count >= min_count:
-                key = (contig, forward_position, "+")
-                candidates[key] = max(candidates.get(key, 0), forward_count)
+            def save_forward() -> None:
+                if (
+                    forward_position is not None
+                    and forward_count >= min_count
+                ):
+                    key = (contig, forward_position, "+")
+                    candidates[key] = max(
+                        candidates.get(key, 0),
+                        forward_count,
+                    )
 
-        def save_reverse(position: int) -> None:
-            count = reverse_counts.pop(position, 0)
-            if count >= min_count:
-                key = (contig, position, "-")
-                candidates[key] = max(candidates.get(key, 0), count)
+            def save_reverse(position: int) -> None:
+                count = reverse_counts.pop(position, 0)
+                if count >= min_count:
+                    key = (contig, position, "-")
+                    candidates[key] = max(candidates.get(key, 0), count)
 
-        for read in bam.fetch(
-            contig,
-            interval.scan_start,
-            interval.scan_end,
-        ):
-            if not eligible_primary(read, min_mapq):
-                continue
-            if read.reference_start < previous_start:
-                raise ValueError(
-                    f"BAM is not coordinate sorted on {contig}: "
-                    f"{read.reference_start} follows {previous_start}"
-                )
-            previous_start = read.reference_start
+            for read in bam.fetch(contig, scan_start, scan_end):
+                if not eligible_primary(read, min_mapq):
+                    continue
+                if read.reference_start < previous_start:
+                    raise ValueError(
+                        f"BAM is not coordinate sorted on {contig}: "
+                        f"{read.reference_start} follows {previous_start}"
+                    )
+                previous_start = read.reference_start
 
-            while reverse_heap and reverse_heap[0] < read.reference_start:
+                while (
+                    reverse_heap
+                    and reverse_heap[0] < read.reference_start
+                ):
+                    save_reverse(heapq.heappop(reverse_heap))
+
+                endpoint = endpoint_position(read)
+                if not scan_start <= endpoint < scan_end:
+                    continue
+                if read.is_reverse:
+                    if endpoint not in reverse_counts:
+                        reverse_counts[endpoint] = 0
+                        heapq.heappush(reverse_heap, endpoint)
+                    reverse_counts[endpoint] += 1
+                elif forward_position == endpoint:
+                    forward_count += 1
+                else:
+                    save_forward()
+                    forward_position = endpoint
+                    forward_count = 1
+
+            save_forward()
+            while reverse_heap:
                 save_reverse(heapq.heappop(reverse_heap))
-
-            endpoint = endpoint_position(read)
-            if not interval.scan_start <= endpoint < interval.scan_end:
-                continue
-            if read.is_reverse:
-                if endpoint not in reverse_counts:
-                    reverse_counts[endpoint] = 0
-                    heapq.heappush(reverse_heap, endpoint)
-                reverse_counts[endpoint] += 1
-            elif forward_position == endpoint:
-                forward_count += 1
-            else:
-                save_forward()
-                forward_position = endpoint
-                forward_count = 1
-
-        save_forward()
-        while reverse_heap:
-            save_reverse(heapq.heappop(reverse_heap))
 
     return [
         (*key, candidates[key])
@@ -475,6 +493,7 @@ def find_best_opposite_signal(
     primary_min_fraction: float,
     ambiguous_min_count: int,
     ambiguous_min_fraction: float,
+    genome_blacklist: GenomeBlacklist | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
     opposite = "-" if strand == "+" else "+"
     counts: Counter[int] = Counter()
@@ -484,6 +503,11 @@ def find_best_opposite_signal(
         if not eligible_primary(read, min_mapq) or strand_symbol(read) != opposite:
             continue
         endpoint = endpoint_position(read)
+        if (
+            genome_blacklist is not None
+            and genome_blacklist.contains(contig, endpoint)
+        ):
+            continue
         if start <= endpoint < end:
             counts[endpoint] += 1
     if not counts:
@@ -863,9 +887,20 @@ def position_is_owned(
     intervals: Iterable[GenomicInterval] | None,
     contig: str,
     position: int,
+    genome_blacklist: GenomeBlacklist | None = None,
 ) -> bool:
-    return intervals is None or any(
-        interval.owns(contig, position) for interval in intervals
+    return (
+        (
+            intervals is None
+            or any(
+                interval.owns(contig, position)
+                for interval in intervals
+            )
+        )
+        and (
+            genome_blacklist is None
+            or not genome_blacklist.contains(contig, position)
+        )
     )
 
 
@@ -875,6 +910,7 @@ def call_ndigenome(
     args: argparse.Namespace,
     contigs: Iterable[str] | None = None,
     intervals: Iterable[GenomicInterval] | None = None,
+    genome_blacklist: GenomeBlacklist | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     selected_intervals = (
         list(intervals) if intervals is not None else None
@@ -885,6 +921,7 @@ def call_ndigenome(
         args.ndigenome_min_mapq,
         contigs,
         selected_intervals,
+        genome_blacklist,
     )
     owned_scanned = [
         candidate
@@ -893,6 +930,7 @@ def call_ndigenome(
             selected_intervals,
             candidate[0],
             candidate[1],
+            genome_blacklist,
         )
     ]
     rows: list[dict[str, Any]] = []
@@ -923,6 +961,7 @@ def call_ndigenome(
             args.ndigenome_min_fraction,
             args.ndigenome_ambiguous_min_count,
             args.ndigenome_ambiguous_min_fraction,
+            genome_blacklist,
         )
         if (
             opposite["endpoint_count"] >= args.ndigenome_min_count
@@ -1029,6 +1068,7 @@ def call_digenome(
     args: argparse.Namespace,
     contigs: Iterable[str] | None = None,
     intervals: Iterable[GenomicInterval] | None = None,
+    genome_blacklist: GenomeBlacklist | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     selected_intervals = (
         list(intervals) if intervals is not None else None
@@ -1043,6 +1083,7 @@ def call_digenome(
         args.digenome_min_mapq,
         contigs,
         selected_intervals,
+        genome_blacklist,
     )
     by_contig: dict[str, dict[str, list[tuple[int, int]]]] = {}
     for contig, position, strand, count in scanned:
@@ -1149,6 +1190,7 @@ def call_digenome(
             selected_intervals,
             contig,
             forward_position,
+            genome_blacklist,
         ):
             continue
         reverse_position = candidate.reverse_position
@@ -1200,6 +1242,7 @@ def call_digenome(
             selected_intervals,
             candidate.contig,
             candidate.forward_position,
+            genome_blacklist,
         )
         for candidate in pair_candidates
     )
@@ -1602,6 +1645,21 @@ def write_output_stream(
             ),
             "secondary_and_supplementary_alignments": "diagnostic only",
         },
+        "genome_blacklist": {
+            "enabled": bool(getattr(args, "genome_blacklist", "")),
+            "path": getattr(args, "genome_blacklist", ""),
+            "sha256": getattr(args, "genome_blacklist_sha256", ""),
+            "intervals": getattr(
+                args,
+                "genome_blacklist_intervals",
+                0,
+            ),
+            "excluded_bases": getattr(
+                args,
+                "genome_blacklist_excluded_bases",
+                0,
+            ),
+        },
         "warnings": (
             [
                 "Multimapper mode counts each read only at its selected "
@@ -1682,6 +1740,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-bam")
     parser.add_argument("--control-sample", default="")
     parser.add_argument("--variant-vcf")
+    parser.add_argument("--genome-blacklist")
     parser.add_argument("--keep-multimappers", action="store_true")
     parser.add_argument("--intervals-file")
     parser.add_argument("--chunk-id")
@@ -1835,6 +1894,36 @@ def call_candidate_rows(
             )
         if selected_intervals is not None:
             validate_intervals_against_bam(selected_intervals, bam)
+        reference_lengths = dict(zip(bam.references, bam.lengths))
+        genome_blacklist_path = getattr(
+            args,
+            "genome_blacklist",
+            None,
+        )
+        genome_blacklist = (
+            load_genome_blacklist(
+                genome_blacklist_path,
+                reference_lengths,
+            )
+            if genome_blacklist_path
+            else None
+        )
+        args.genome_blacklist = genome_blacklist_path or ""
+        args.genome_blacklist_sha256 = (
+            genome_blacklist.sha256
+            if genome_blacklist is not None
+            else ""
+        )
+        args.genome_blacklist_intervals = (
+            genome_blacklist.interval_count
+            if genome_blacklist is not None
+            else 0
+        )
+        args.genome_blacklist_excluded_bases = (
+            genome_blacklist.excluded_bases
+            if genome_blacklist is not None
+            else 0
+        )
         check_bam_layout(bam, min_mapq, require_paired, "BAM")
 
         control_bam = None
@@ -1892,6 +1981,7 @@ def call_candidate_rows(
                     args,
                     contigs,
                     selected_intervals,
+                    genome_blacklist,
                 )
             else:
                 rows, candidate_count = call_digenome(
@@ -1900,6 +1990,7 @@ def call_candidate_rows(
                     args,
                     contigs,
                     selected_intervals,
+                    genome_blacklist,
                 )
             add_control_evidence(
                 rows,

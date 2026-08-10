@@ -64,6 +64,12 @@ scan the padded range, but nDigenome calls are owned by their focal endpoint
 and Digenome calls are owned by their forward endpoint. This preserves nearby
 strand evidence across boundaries while emitting each call once.
 
+When `--genome_blacklist` is supplied, merged BED intervals are subtracted
+from each padded scan range before indexed BAM iteration. Focal nDigenome
+endpoints, Digenome forward/reverse endpoints, and nDigenome opposite-strand
+classification evidence inside the blacklist are excluded. Chunk plans report
+owned, callable, and excluded bases plus estimated callable mapped records.
+
 Chunk callers write intermediate JSONL rows without applying control q-values
 or final filters. A final SQLite-backed merge orders all rows, calculates
 Benjamini-Hochberg q-values across the complete sample, applies filters, and

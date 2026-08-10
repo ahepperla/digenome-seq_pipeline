@@ -102,6 +102,7 @@ class NDigenomeTests(unittest.TestCase):
             control_bam=str(control) if control else None,
             control_sample="Control" if control else "",
             variant_vcf=str(vcf) if vcf else None,
+            genome_blacklist=None,
             keep_multimappers=False,
             ndigenome_min_count=5,
             ndigenome_min_fraction=0.20,
@@ -169,6 +170,28 @@ class NDigenomeTests(unittest.TestCase):
             all(row["signal_classification"] == "POSSIBLE_DSB" for row in rows)
         )
         self.assertTrue(all(row["filter_status"] == "FILTERED" for row in rows))
+
+    def test_blacklisted_opposite_endpoint_does_not_classify_focal_site(self) -> None:
+        reads = [self.make_read(f"forward_{index}", 100) for index in range(8)]
+        reads += [
+            self.make_read(f"reverse_{index}", 53, reverse=True)
+            for index in range(8)
+        ]
+        reads += self.background_covering(100, 8)
+        bam = self.write_bam("blacklisted_opposite", reads)
+        blacklist = self.tmp / "blacklisted_opposite.bed"
+        blacklist.write_text("chr1\t102\t103\n")
+        args = self.args(bam, "blacklisted_opposite")
+        args.genome_blacklist = str(blacklist)
+
+        cleavage.run_serial_calling(args)
+
+        rows = self.read_rows("blacklisted_opposite")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["position_0based"], "100")
+        self.assertEqual(rows[0]["signal_classification"], "SSB")
+        self.assertEqual(rows[0]["opposite_position_0based"], "")
+        self.assertEqual(rows[0]["opposite_count"], "0")
 
     def test_opposite_signal_prefers_threshold_passing_fraction(self) -> None:
         reads = [
@@ -472,6 +495,53 @@ class NDigenomeTests(unittest.TestCase):
         self.assertEqual(rows[0]["filter_status"], "PASS")
         self.assertEqual(rows[0]["forward_position_0based"], "500")
         self.assertEqual(rows[0]["reverse_position_0based"], "500")
+
+    def test_digenome_pair_is_excluded_when_one_endpoint_is_blacklisted(
+        self,
+    ) -> None:
+        reads = [
+            self.make_read(f"forward_{index}", 500) for index in range(8)
+        ]
+        reads += [
+            self.make_read(f"reverse_{index}", 449, reverse=True)
+            for index in range(8)
+        ]
+        bam = self.write_bam("digenome_one_blacklisted_endpoint", reads)
+        cleavage.run_serial_calling(
+            self.args(
+                bam,
+                "digenome_one_blacklisted_endpoint_baseline",
+                analysis="digenome",
+            )
+        )
+        baseline_rows = self.read_rows(
+            "digenome_one_blacklisted_endpoint_baseline",
+            "digenome",
+        )
+        self.assertEqual(len(baseline_rows), 1)
+        self.assertEqual(
+            baseline_rows[0]["reverse_position_0based"],
+            "498",
+        )
+
+        blacklist = self.tmp / "digenome_one_blacklisted_endpoint.bed"
+        blacklist.write_text("chr1\t498\t499\n")
+        args = self.args(
+            bam,
+            "digenome_one_blacklisted_endpoint_masked",
+            analysis="digenome",
+        )
+        args.genome_blacklist = str(blacklist)
+        qc = cleavage.run_serial_calling(args)
+
+        self.assertEqual(qc["reported_candidates"], 0)
+        self.assertEqual(
+            self.read_rows(
+                "digenome_one_blacklisted_endpoint_masked",
+                "digenome",
+            ),
+            [],
+        )
 
     def test_digenome_rejects_one_strand_only_signal(self) -> None:
         reads = [

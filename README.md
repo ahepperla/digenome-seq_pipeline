@@ -156,6 +156,7 @@ The template is at `assets/samplesheet_template.csv`.
 | `-work-dir` | Nextflow default | Temporary Nextflow work directory |
 | `--keep_multimappers` | Off | Retain MAPQ 0 primary alignments for repetitive regions |
 | `--cleavage_chunks` | `8` | Maximum number of parallel one-CPU cleavage callers |
+| `--genome_blacklist` | Unset | BED/BED.gz regions excluded before cleavage scanning |
 | `--publish_concat_fastqs` | Off | Publish combined FASTQs |
 | `--publish_trimmed_fastqs` | Off | Publish fastp output FASTQs |
 
@@ -166,6 +167,31 @@ intervals, so increasing the value can shorten a job that would otherwise
 contain one whole chromosome. The planner may create fewer chunks only when
 the mapped data and coordinate resolution cannot produce that many nonempty
 ownership ranges.
+
+## Genome blacklist
+
+Use an optional genome-matched BED file to skip regions before endpoint
+candidate scanning:
+
+```bash
+nextflow run . \
+  ... \
+  --genome_blacklist /path/to/excluded_regions.bed.gz
+```
+
+The file must use 0-based, half-open BED coordinates and BAM-matching contig
+names. Overlapping or adjacent BED rows are merged. Unknown contigs,
+out-of-range coordinates, malformed rows, and supplied files with no intervals
+stop the run.
+
+Focal nDigenome endpoints and both Digenome endpoints are excluded inside
+blacklisted regions. Blacklisted opposite-strand endpoints also do not affect
+nDigenome classification. The BED is optional and path-only: the pipeline does
+not download, select, or maintain blacklist resources automatically.
+
+The sample QC JSON records the staged filename, SHA-256 checksum, merged
+interval count, and excluded-base count. Final filters and q-values remain
+sample-wide over candidates from the callable, nonblacklisted genome.
 
 Available profiles:
 

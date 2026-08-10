@@ -9,6 +9,8 @@ import sys
 from fractions import Fraction
 from pathlib import Path
 
+from genome_blacklist import load_genome_blacklist
+
 try:
     import pysam
 except ImportError:  # pragma: no cover - exercised by the command-line guard
@@ -25,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bam", required=True)
     parser.add_argument("--chunks", type=int, required=True)
     parser.add_argument("--padding", type=int, required=True)
+    parser.add_argument("--genome-blacklist")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--plan", required=True)
     return parser
@@ -38,6 +41,7 @@ def plan_chunks(
     bam_path: str,
     requested_chunks: int,
     padding: int = 0,
+    genome_blacklist_path: str | None = None,
 ) -> list[dict[str, object]]:
     if pysam is None:
         raise RuntimeError(
@@ -61,6 +65,11 @@ def plan_chunks(
             for stat in bam.get_index_statistics()
             if stat.mapped > 0
         ]
+    genome_blacklist = (
+        load_genome_blacklist(genome_blacklist_path, lengths)
+        if genome_blacklist_path
+        else None
+    )
 
     if not weighted:
         raise ValueError("BAM index reports no mapped alignments")
@@ -76,6 +85,7 @@ def plan_chunks(
         {
             "chunk_id": index,
             "mapped_records": Fraction(0),
+            "callable_mapped_records": Fraction(0),
             "intervals": [],
         }
         for index in range(chunk_count)
@@ -119,6 +129,16 @@ def plan_chunks(
                 mapped_records * (end - start),
                 contig_length,
             )
+            excluded_bases = (
+                genome_blacklist.overlap_bases(contig, start, end)
+                if genome_blacklist is not None
+                else 0
+            )
+            callable_bases = end - start - excluded_bases
+            callable_weight = Fraction(
+                mapped_records * callable_bases,
+                contig_length,
+            )
             midpoint_weight = contig_start_weight + Fraction(
                 mapped_records * (start + end),
                 2 * contig_length,
@@ -128,6 +148,9 @@ def plan_chunks(
                 int(midpoint_weight * chunk_count // total_mapped),
             )
             chunks[chunk_index]["mapped_records"] += interval_weight
+            chunks[chunk_index][
+                "callable_mapped_records"
+            ] += callable_weight
             chunks[chunk_index]["intervals"].append(
                 {
                     "contig": contig,
@@ -135,6 +158,8 @@ def plan_chunks(
                     "end": end,
                     "scan_start": max(0, start - padding),
                     "scan_end": min(contig_length, end + padding),
+                    "callable_bases": callable_bases,
+                    "excluded_bases": excluded_bases,
                 }
             )
         cumulative_mapped += mapped_records
@@ -146,6 +171,9 @@ def plan_chunks(
         chunk["chunk_id"] = chunk_id
         chunk["mapped_records"] = _rounded_fraction(
             chunk["mapped_records"]
+        )
+        chunk["callable_mapped_records"] = _rounded_fraction(
+            chunk["callable_mapped_records"]
         )
     return nonempty_chunks
 
@@ -167,7 +195,10 @@ def write_plan(
                 "interval_count",
                 "contig_count",
                 "estimated_mapped_records",
+                "estimated_callable_mapped_records",
                 "owned_bases",
+                "callable_bases",
+                "excluded_bases",
                 "intervals",
             ]
         )
@@ -188,6 +219,8 @@ def write_plan(
                         "owner_end",
                         "scan_start",
                         "scan_end",
+                        "callable_bases",
+                        "excluded_bases",
                     ]
                 )
                 for interval in intervals:
@@ -198,6 +231,8 @@ def write_plan(
                             interval["end"],
                             interval["scan_start"],
                             interval["scan_end"],
+                            interval["callable_bases"],
+                            interval["excluded_bases"],
                         ]
                     )
 
@@ -210,8 +245,17 @@ def write_plan(
                     len(intervals),
                     len(contigs),
                     chunk["mapped_records"],
+                    chunk["callable_mapped_records"],
                     sum(
                         int(interval["end"]) - int(interval["start"])
+                        for interval in intervals
+                    ),
+                    sum(
+                        int(interval["callable_bases"])
+                        for interval in intervals
+                    ),
+                    sum(
+                        int(interval["excluded_bases"])
                         for interval in intervals
                     ),
                     ",".join(
@@ -226,7 +270,12 @@ def write_plan(
 def main() -> None:
     args = build_parser().parse_args()
     try:
-        chunks = plan_chunks(args.bam, args.chunks, args.padding)
+        chunks = plan_chunks(
+            args.bam,
+            args.chunks,
+            args.padding,
+            args.genome_blacklist,
+        )
         write_plan(
             chunks,
             Path(args.output_dir),

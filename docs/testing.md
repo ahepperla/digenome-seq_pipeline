@@ -29,6 +29,7 @@ Coverage includes:
 - VCF contig compatibility and insufficient-control-coverage handling
 - complete, gap-free, nonoverlapping chunk interval validation
 - chromosome-split boundary padding and single-owner call emission
+- optional BED/BED.gz blacklist parsing, validation, provenance, and scanning
 - Fisher exact and Benjamini-Hochberg calculations
 - complete index reuse
 - FASTA fingerprint changes
