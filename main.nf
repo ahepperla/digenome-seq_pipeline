@@ -211,7 +211,7 @@ def container_sources = source_manifest_lines
     }
 
 def run_info = [
-    schema_version: 9,
+    schema_version: 10,
     analysis: selected_analysis,
     requested_genome: requested_genome,
     resolved_genome: selected_genome,
@@ -249,7 +249,7 @@ def run_info = [
         reverse_cutoff: params.digenome_reverse_cutoff,
         depth_cutoff: params.digenome_depth_cutoff,
         fraction_cutoff: params.digenome_fraction_cutoff,
-        score_cutoff: params.digenome_score_cutoff
+        pair_score_cutoff: params.digenome_pair_score_cutoff
     ],
     ndigenome: [
         min_count: params.ndigenome_min_count,
@@ -680,7 +680,7 @@ process CLEAVAGE_CALL_CHUNK {
         --digenome-reverse-cutoff ${params.digenome_reverse_cutoff} \
         --digenome-depth-cutoff ${params.digenome_depth_cutoff} \
         --digenome-fraction-cutoff ${params.digenome_fraction_cutoff} \
-        --digenome-score-cutoff ${params.digenome_score_cutoff} \
+        --digenome-pair-score-cutoff ${params.digenome_pair_score_cutoff} \
         --artifact-window ${params.cleavage_artifact_window} \
         --max-softclip-fraction ${params.cleavage_max_softclip_fraction} \
         --max-indel-fraction ${params.cleavage_max_indel_fraction} \

@@ -214,7 +214,7 @@ class CleavageChunkTests(unittest.TestCase):
             digenome_reverse_cutoff=4,
             digenome_depth_cutoff=4,
             digenome_fraction_cutoff=0.20,
-            digenome_score_cutoff=0.20,
+            digenome_pair_score_cutoff=0.20,
             artifact_window=10,
             max_softclip_fraction=0.20,
             max_indel_fraction=0.20,

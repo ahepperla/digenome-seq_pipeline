@@ -250,6 +250,11 @@ Digenome mode pairs nearby forward and reverse 5-prime endpoint pileups.
 nDigenome mode evaluates each strand independently and rejects meaningful
 opposite-strand support from the high-confidence SSB set.
 
+Digenome outputs report `digenome_pair_score`, which drives pairing and
+filtering, plus `rgen_digenome_score`, which reproduces the standalone CRISPR
+RGEN Tools v1.0 score for comparison with historical results. Matched controls
+receive both scores independently.
+
 Output rows use:
 
 - `PASS`: retained in `*.high_confidence.tsv` and BED
@@ -274,13 +279,14 @@ All calling and filtering thresholds are configurable. For example:
 --cleavage_control_min_depth 10
 ```
 
-The Digenome defaults follow the
-[original Digenome distribution](http://www.rgenome.net/static/digenome-js/digenome)
-and [public toolkit](https://github.com/snugel/digenome-toolkit). The
-nDigenome focal defaults of at least 10 endpoint reads and at least 20% local
-fraction come from [Kim et al. 2020](https://doi.org/10.1093/nar/gkaa764).
-Other artifact and control settings are pipeline defaults that should be
-calibrated with positive and negative controls.
+The Digenome count, depth, fraction, and numeric score defaults are informed
+by the [original Digenome distribution](http://www.rgenome.net/static/digenome-js/digenome).
+The pair and RGEN scores are distinct formulas, so their values and cutoffs
+are not interchangeable. The nDigenome focal defaults of at least 10 endpoint
+reads and at least 20% local fraction come from
+[Kim et al. 2020](https://doi.org/10.1093/nar/gkaa764). Other artifact and
+control settings are pipeline defaults that should be calibrated with
+positive and negative controls.
 
 See [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md) for equations,
 exact comparisons, matching behavior, and all filter reasons.

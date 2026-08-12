@@ -147,7 +147,7 @@ matching. The matching maximizes, in order:
 
 1. pairs that pass every caller threshold
 2. total selected pairs
-3. total Digenome score
+3. total `digenome_pair_score`
 4. stable coordinate order
 
 This prevents a high-scoring local pair from consuming endpoints that could
@@ -158,14 +158,37 @@ window.
 Using endpoint fractions on a zero-to-one scale:
 
 ```text
-score = forward_fraction * reverse_fraction
-        * (forward_count + reverse_count) / 4
+digenome_pair_score = forward_fraction * reverse_fraction
+                       * (forward_count + reverse_count) / 4
 ```
 
-The default count, depth, fraction, and score checks use strict greater-than
-semantics to match the original Digenome command. Evaluated pairs that fail a
-threshold remain in the audit TSV. Only unfiltered `DSB` rows are high
-confidence.
+The count, depth, fraction, and pair-score checks use strict greater-than
+semantics. Evaluated pairs that fail a threshold remain in the audit TSV.
+Only unfiltered `DSB` rows are high confidence.
+
+For historical comparison, `rgen_digenome_score` reproduces the standalone
+CRISPR RGEN Tools v1.0 calculation. For each selected forward endpoint it:
+
+1. anchors the historical reverse coordinate at
+   `forward_position + overhang - 1`
+2. evaluates offsets `-2` through `+2` around both anchors
+3. uses unstranded total depth at each coordinate
+4. subtracts one from each endpoint count
+5. adds the forward-anchored and reverse-anchored contributions using
+   single-precision arithmetic
+
+Each directional contribution is:
+
+```text
+((count_1 - 1) / total_depth_1)
+* ((count_2 - 1) / total_depth_2)
+* (count_1 + count_2 - 2)
+```
+
+This comparison score follows the historical executable's alignment filter,
+including supplementary but excluding unmapped, secondary, QC-failed,
+duplicate, and low-MAPQ alignments. It does not affect pairing or filtering.
+Blacklist-masked neighborhood positions contribute nothing.
 
 Default Digenome criteria:
 
@@ -178,7 +201,7 @@ Default Digenome criteria:
 | Reverse endpoint count cutoff | 5 | `>` |
 | Per-strand depth cutoff | 10 | `>` |
 | Per-strand endpoint fraction cutoff | 0.20 | `>` |
-| Digenome score cutoff | 2.5 | `>` |
+| Digenome pair-score cutoff | 2.5 | `>` |
 
 For example, a forward cutoff of `5` requires at least six forward endpoints.
 The Nextflow parameters use the `digenome_*` prefix.
@@ -273,7 +296,8 @@ prefix.
 
 The defaults have three different origins:
 
-1. **Digenome reference settings.** The Digenome defaults reproduce:
+1. **Digenome reference settings.** The count, depth, fraction, and numeric
+   score defaults originate from:
 
    ```text
    digenome -G 0 -q 1 -f 5 -r 5 -d 10 -R 0.2 -s 2.5
@@ -281,9 +305,10 @@ The defaults have three different origins:
 
    The command behavior came from the
    [original Digenome distribution](http://www.rgenome.net/static/digenome-js/digenome).
-   The score equation and endpoint pairing were cross-checked against the
-   [public Digenome toolkit](https://github.com/snugel/digenome-toolkit),
-   particularly `9.digenome_score.py`.
+   The pipeline applies `2.5` to `digenome_pair_score`, so it is not
+   numerically equivalent to the standalone command's `-s 2.5` filter.
+   The separately reported `rgen_digenome_score` was cross-checked directly
+   against the standalone v1.0 executable and is comparison-only.
 
 2. **Published nDigenome focal thresholds.** The defaults of at least 10 reads
    sharing a 5-prime endpoint and at least 20% local fraction come from Kim et

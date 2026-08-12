@@ -135,6 +135,21 @@ class WorkflowStaticTests(unittest.TestCase):
             readme,
         )
 
+    def test_old_digenome_score_names_are_rejected(self) -> None:
+        combined = "\n".join(
+            (ROOT / path).read_text()
+            for path in (
+                "main.nf",
+                "nextflow.config",
+                "nextflow_schema.json",
+                "docs/parameters.md",
+            )
+        )
+        self.assertIn("digenome_pair_score_cutoff", combined)
+        self.assertIn("--digenome-pair-score-cutoff", combined)
+        self.assertNotIn("digenome_score_cutoff", combined)
+        self.assertNotIn("--digenome-score-cutoff", combined)
+
     def test_chunk_plan_is_joined_before_one_to_many_expansion(self) -> None:
         main = (ROOT / "main.nf").read_text()
         request_block = main.split(

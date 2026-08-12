@@ -203,7 +203,7 @@
       "maximum": 1,
       "default": 0.2
     },
-    "digenome_score_cutoff": {
+    "digenome_pair_score_cutoff": {
       "type": "number",
       "minimum": 0,
       "default": 2.5

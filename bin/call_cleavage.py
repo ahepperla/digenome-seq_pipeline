@@ -11,6 +11,7 @@ import heapq
 import json
 import math
 import statistics
+import struct
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -54,7 +55,8 @@ TSV_FIELDS = [
     "reverse_endpoint_count",
     "reverse_depth",
     "reverse_fraction",
-    "digenome_score",
+    "digenome_pair_score",
+    "rgen_digenome_score",
     "signal_classification",
     "classification",
     "filter_status",
@@ -81,7 +83,8 @@ TSV_FIELDS = [
     "control_reverse_endpoint_count",
     "control_reverse_depth",
     "control_reverse_fraction",
-    "control_digenome_score",
+    "control_digenome_pair_score",
+    "control_rgen_digenome_score",
     "control_fold_enrichment",
     "control_fisher_p",
     "control_fisher_q",
@@ -92,7 +95,8 @@ FLOAT_FIELDS = {
     "opposite_fraction",
     "forward_fraction",
     "reverse_fraction",
-    "digenome_score",
+    "digenome_pair_score",
+    "rgen_digenome_score",
     "support_mean_mapq",
     "local_mean_mapq",
     "support_mean_nm",
@@ -102,7 +106,8 @@ FLOAT_FIELDS = {
     "control_fraction",
     "control_forward_fraction",
     "control_reverse_fraction",
-    "control_digenome_score",
+    "control_digenome_pair_score",
+    "control_rgen_digenome_score",
     "control_fold_enrichment",
     "control_fisher_p",
     "control_fisher_q",
@@ -600,19 +605,140 @@ def known_indels(
     return sorted(overlaps)
 
 
-def digenome_score(
+def digenome_pair_score(
     forward_count: int,
     forward_fraction: float,
     reverse_count: int,
     reverse_fraction: float,
 ) -> float:
-    """Return the published Digenome score using fractional strand ratios."""
+    """Return the pipeline pair score using strand-specific fractions."""
     return (
         forward_fraction
         * reverse_fraction
         * (forward_count + reverse_count)
         / 4.0
     )
+
+
+def eligible_rgen_alignment(read: Any, min_mapq: int = 1) -> bool:
+    """Match the alignment filter in the standalone RGEN v1.0 executable."""
+    return not (
+        read.is_unmapped
+        or read.is_secondary
+        or read.is_qcfail
+        or read.is_duplicate
+        or read.mapping_quality < min_mapq
+    )
+
+
+def measure_rgen_position(
+    bam: Any,
+    contig: str,
+    position: int,
+    min_mapq: int,
+) -> dict[str, int]:
+    """Measure RGEN endpoint counts and unstranded depth at one base."""
+    forward_count = 0
+    reverse_count = 0
+    total_depth = 0
+    for read in bam.fetch(contig, position, position + 1):
+        if not eligible_rgen_alignment(read, min_mapq):
+            continue
+        if (
+            read.reference_start is None
+            or read.reference_end is None
+            or not read.reference_start <= position < read.reference_end
+        ):
+            continue
+        total_depth += 1
+        if read.is_reverse:
+            reverse_count += int(read.reference_end - 1 == position)
+        else:
+            forward_count += int(read.reference_start == position)
+    return {
+        "forward_endpoint_count": forward_count,
+        "reverse_endpoint_count": reverse_count,
+        "total_depth": total_depth,
+    }
+
+
+def float32(value: float | int) -> float:
+    """Round one value to IEEE-754 single precision."""
+    return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+
+
+def rgen_score_contribution(
+    first_count: int,
+    first_depth: int,
+    second_count: int,
+    second_depth: int,
+) -> float:
+    """Return one single-precision RGEN v1.0 score contribution."""
+    if first_depth <= 0 or second_depth <= 0:
+        return 0.0
+    value = float32(float32(first_count) - float32(1.0))
+    value = float32(value / float32(first_depth))
+    value = float32(
+        value * float32(float32(second_count) - float32(1.0))
+    )
+    value = float32(value / float32(second_depth))
+    value = float32(
+        value
+        * float32(float32(first_count + second_count) - float32(2.0))
+    )
+    return value
+
+
+def calculate_rgen_digenome_score(
+    get_metrics: Any,
+    contig: str,
+    contig_length: int,
+    forward_position: int,
+    overhang: int,
+    genome_blacklist: GenomeBlacklist | None = None,
+) -> float:
+    """Reproduce the standalone RGEN v1.0 five-position score."""
+
+    def metrics_at(position: int) -> dict[str, int] | None:
+        if not 0 <= position < contig_length:
+            return None
+        if (
+            genome_blacklist is not None
+            and genome_blacklist.contains(contig, position)
+        ):
+            return None
+        return get_metrics(contig, position)
+
+    forward_anchor = metrics_at(forward_position)
+    reverse_center = forward_position + overhang - 1
+    reverse_anchor = metrics_at(reverse_center)
+    total = float32(0.0)
+    for offset in range(-2, 3):
+        forward_contribution = float32(0.0)
+        nearby_reverse = metrics_at(reverse_center + offset)
+        if forward_anchor is not None and nearby_reverse is not None:
+            forward_contribution = rgen_score_contribution(
+                forward_anchor["forward_endpoint_count"],
+                forward_anchor["total_depth"],
+                nearby_reverse["reverse_endpoint_count"],
+                nearby_reverse["total_depth"],
+            )
+
+        reverse_contribution = float32(0.0)
+        nearby_forward = metrics_at(forward_position + offset)
+        if reverse_anchor is not None and nearby_forward is not None:
+            reverse_contribution = rgen_score_contribution(
+                reverse_anchor["reverse_endpoint_count"],
+                reverse_anchor["total_depth"],
+                nearby_forward["forward_endpoint_count"],
+                nearby_forward["total_depth"],
+            )
+
+        directional_total = float32(
+            reverse_contribution + forward_contribution
+        )
+        total = float32(directional_total + total)
+    return total
 
 
 # One-to-one Digenome endpoint pairing.
@@ -624,7 +750,7 @@ class DigenomePairCandidate:
     reverse_position: int
     forward_metrics: dict[str, Any]
     reverse_metrics: dict[str, Any]
-    score: float
+    pair_score: float
     caller_filter_reasons: list[str]
 
     @property
@@ -759,7 +885,7 @@ def select_digenome_pairs(
             tuple[MatchingEdge, DigenomePairCandidate]
         ] = []
         score_ratios = [
-            float(candidate.score).as_integer_ratio()
+            float(candidate.pair_score).as_integer_ratio()
             for candidate in contig_candidates
         ]
         # Binary-float denominators are powers of two, so the largest is
@@ -908,7 +1034,8 @@ def create_base_call_row(
         "control_reverse_endpoint_count": 0,
         "control_reverse_depth": 0,
         "control_reverse_fraction": 0.0,
-        "control_digenome_score": None,
+        "control_digenome_pair_score": None,
+        "control_rgen_digenome_score": None,
         "control_fold_enrichment": None,
         "control_fisher_p": None,
         "control_fisher_q": None,
@@ -1069,8 +1196,8 @@ def call_ndigenome(
                     "reverse_fraction": metrics["endpoint_fraction"],
                 }
             )
-        row["digenome_score"] = (
-            digenome_score(
+        pair_score = (
+            digenome_pair_score(
                 row["forward_endpoint_count"],
                 row["forward_fraction"],
                 row["reverse_endpoint_count"],
@@ -1079,6 +1206,8 @@ def call_ndigenome(
             if opposite_position is not None
             else 0.0
         )
+        row["digenome_pair_score"] = pair_score
+        row["rgen_digenome_score"] = None
         row["known_indel_overlap"] = ";".join(
             known_indels(
                 variant_file,
@@ -1111,6 +1240,7 @@ def call_digenome(
         args.digenome_reverse_cutoff + 1,
     )
     site_metric_cache: dict[tuple[str, int, str], dict[str, Any]] = {}
+    rgen_metric_cache: dict[tuple[str, int], dict[str, int]] = {}
 
     def get_site_metrics(
         contig: str,
@@ -1128,6 +1258,20 @@ def call_digenome(
                 args.digenome_min_mapq,
             )
         return site_metric_cache[key]
+
+    def get_rgen_metrics(
+        contig: str,
+        position: int,
+    ) -> dict[str, int]:
+        key = (contig, position)
+        if key not in rgen_metric_cache:
+            rgen_metric_cache[key] = measure_rgen_position(
+                bam,
+                contig,
+                position,
+                args.digenome_min_mapq,
+            )
+        return rgen_metric_cache[key]
 
     def build_pair_candidates(
         selected_contigs: Iterable[str] | None = None,
@@ -1171,7 +1315,7 @@ def call_digenome(
                         reverse_position,
                         "-",
                     )
-                    score = digenome_score(
+                    pair_score = digenome_pair_score(
                         forward_metrics["endpoint_count"],
                         forward_metrics["endpoint_fraction"],
                         reverse_metrics["endpoint_count"],
@@ -1208,8 +1352,10 @@ def call_digenome(
                         <= args.digenome_fraction_cutoff
                     ):
                         caller_reasons.append("LOW_REVERSE_FRACTION")
-                    if score <= args.digenome_score_cutoff:
-                        caller_reasons.append("LOW_DIGENOME_SCORE")
+                    if pair_score <= args.digenome_pair_score_cutoff:
+                        caller_reasons.append(
+                            "LOW_DIGENOME_PAIR_SCORE"
+                        )
                     pair_candidates.append(
                         DigenomePairCandidate(
                             contig=contig,
@@ -1217,7 +1363,7 @@ def call_digenome(
                             reverse_position=reverse_position,
                             forward_metrics=forward_metrics,
                             reverse_metrics=reverse_metrics,
-                            score=score,
+                            pair_score=pair_score,
                             caller_filter_reasons=caller_reasons,
                         )
                     )
@@ -1402,7 +1548,15 @@ def call_digenome(
                 "reverse_endpoint_count": reverse_metrics["endpoint_count"],
                 "reverse_depth": reverse_metrics["strand_depth"],
                 "reverse_fraction": reverse_metrics["endpoint_fraction"],
-                "digenome_score": candidate.score,
+                "digenome_pair_score": candidate.pair_score,
+                "rgen_digenome_score": calculate_rgen_digenome_score(
+                    get_rgen_metrics,
+                    contig,
+                    bam.get_reference_length(contig),
+                    forward_position,
+                    args.digenome_overhang,
+                    genome_blacklist,
+                ),
                 "signal_classification": "DSB",
                 "_caller_filter_reasons": (
                     candidate.caller_filter_reasons
@@ -1542,34 +1696,75 @@ def add_control_evidence(
     control_bam: Any | None,
     args: argparse.Namespace,
     adjust_q_values: bool = True,
+    genome_blacklist: GenomeBlacklist | None = None,
 ) -> None:
     min_mapq = (
         args.ndigenome_min_mapq
         if args.analysis == "ndigenome"
         else args.digenome_min_mapq
     )
+    control_metric_cache: dict[
+        tuple[str, int, str],
+        dict[str, Any],
+    ] = {}
+    control_rgen_metric_cache: dict[
+        tuple[str, int],
+        dict[str, int],
+    ] = {}
+
+    def get_control_metrics(
+        contig: str,
+        position: int,
+        strand: str,
+    ) -> dict[str, Any]:
+        key = (contig, position, strand)
+        if key not in control_metric_cache:
+            control_metric_cache[key] = measure_site_metrics(
+                control_bam,
+                contig,
+                position,
+                strand,
+                args.artifact_window,
+                min_mapq,
+            )
+        return control_metric_cache[key]
+
+    def get_control_rgen_metrics(
+        contig: str,
+        position: int,
+    ) -> dict[str, int]:
+        key = (contig, position)
+        if key not in control_rgen_metric_cache:
+            control_rgen_metric_cache[key] = measure_rgen_position(
+                control_bam,
+                contig,
+                position,
+                min_mapq,
+            )
+        return control_rgen_metric_cache[key]
+
     controlled_indexes: list[int] = []
     for index, row in enumerate(rows):
         if control_bam is None:
             continue
         if args.analysis == "digenome":
-            forward = measure_site_metrics(
-                control_bam,
+            forward = get_control_metrics(
                 row["contig"],
                 row["forward_position_0based"],
                 "+",
-                args.artifact_window,
-                min_mapq,
             )
-            reverse = measure_site_metrics(
-                control_bam,
+            reverse = get_control_metrics(
                 row["contig"],
                 row["reverse_position_0based"],
                 "-",
-                args.artifact_window,
-                min_mapq,
             )
             control = combine_site_metrics(forward, reverse)
+            pair_score = digenome_pair_score(
+                forward["endpoint_count"],
+                forward["endpoint_fraction"],
+                reverse["endpoint_count"],
+                reverse["endpoint_fraction"],
+            )
             row.update(
                 {
                     "control_forward_endpoint_count": forward["endpoint_count"],
@@ -1578,11 +1773,16 @@ def add_control_evidence(
                     "control_reverse_endpoint_count": reverse["endpoint_count"],
                     "control_reverse_depth": reverse["strand_depth"],
                     "control_reverse_fraction": reverse["endpoint_fraction"],
-                    "control_digenome_score": digenome_score(
-                        forward["endpoint_count"],
-                        forward["endpoint_fraction"],
-                        reverse["endpoint_count"],
-                        reverse["endpoint_fraction"],
+                    "control_digenome_pair_score": pair_score,
+                    "control_rgen_digenome_score": (
+                        calculate_rgen_digenome_score(
+                            get_control_rgen_metrics,
+                            row["contig"],
+                            control_bam.get_reference_length(row["contig"]),
+                            row["forward_position_0based"],
+                            args.digenome_overhang,
+                            genome_blacklist,
+                        )
                     ),
                 }
             )
@@ -1828,7 +2028,7 @@ def write_output_stream(
                 manual_review_writer.writerow(formatted)
 
     qc = {
-        "schema_version": 5,
+        "schema_version": 6,
         "sample": args.sample,
         "analysis": args.analysis,
         "control_status": (
@@ -1988,7 +2188,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--digenome-fraction-cutoff", type=float, default=0.20
     )
-    parser.add_argument("--digenome-score-cutoff", type=float, default=2.5)
+    parser.add_argument(
+        "--digenome-pair-score-cutoff",
+        type=float,
+        default=2.5,
+    )
     return parser
 
 
@@ -2049,7 +2253,7 @@ def validate_args(args: argparse.Namespace) -> None:
                 f"--{name.replace('_', '-')} must be non-negative"
             )
     for name in (
-        "digenome_score_cutoff",
+        "digenome_pair_score_cutoff",
         "min_support_mean_mapq",
         "control_min_fold",
     ):
@@ -2201,6 +2405,7 @@ def call_candidate_rows(
                 control_bam,
                 args,
                 adjust_q_values=adjust_q_values,
+                genome_blacklist=genome_blacklist,
             )
         finally:
             if control_bam is not None:
@@ -2334,7 +2539,7 @@ def run_chunk_calling(args: argparse.Namespace) -> dict[str, Any]:
 
     expected_contig_lengths = mapped_bam_contig_lengths(args.bam)
     summary = {
-        "schema_version": 2,
+        "schema_version": 3,
         "sample": args.sample,
         "analysis": args.analysis,
         "chunk_id": args.chunk_id,

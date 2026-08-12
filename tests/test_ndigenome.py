@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 try:
@@ -22,6 +24,25 @@ def query_length(cigar: list[tuple[int, int]]) -> int:
 
 
 class FilterReasonTests(unittest.TestCase):
+    def test_output_schema_has_only_the_four_explicit_score_columns(
+        self,
+    ) -> None:
+        expected = [
+            "digenome_pair_score",
+            "rgen_digenome_score",
+            "control_digenome_pair_score",
+            "control_rgen_digenome_score",
+        ]
+        score_fields = [
+            field
+            for field in cleavage.TSV_FIELDS
+            if "digenome" in field and "score" in field
+        ]
+        self.assertEqual(score_fields, expected)
+        self.assertTrue(set(expected).issubset(cleavage.FLOAT_FIELDS))
+        self.assertNotIn("digenome_score", cleavage.TSV_FIELDS)
+        self.assertNotIn("control_digenome_score", cleavage.TSV_FIELDS)
+
     def test_control_filter_reports_each_failed_criterion(self) -> None:
         args = argparse.Namespace(
             analysis="ndigenome",
@@ -168,7 +189,7 @@ class NDigenomeTests(unittest.TestCase):
             digenome_reverse_cutoff=4,
             digenome_depth_cutoff=4,
             digenome_fraction_cutoff=0.20,
-            digenome_score_cutoff=1.0,
+            digenome_pair_score_cutoff=1.0,
             artifact_window=10,
             max_softclip_fraction=0.20,
             max_indel_fraction=0.20,
@@ -567,12 +588,34 @@ class NDigenomeTests(unittest.TestCase):
                 "2",
                 "--ndigenome-ambiguous-min-fraction",
                 "0.1",
+                "--digenome-pair-score-cutoff",
+                "1.25",
             ]
         )
         self.assertEqual(args.ndigenome_min_count, 7)
         self.assertEqual(args.ndigenome_min_fraction, 0.3)
         self.assertEqual(args.ndigenome_min_mapq, 2)
         self.assertEqual(args.ndigenome_opposite_window, 4)
+        self.assertEqual(args.digenome_pair_score_cutoff, 1.25)
+
+        with (
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            cleavage.build_parser().parse_args(
+                [
+                    "--analysis",
+                    "digenome",
+                    "--bam",
+                    "input.bam",
+                    "--sample",
+                    "Sample",
+                    "--output-prefix",
+                    "Sample",
+                    "--digenome-score-cutoff",
+                    "1.25",
+                ]
+            )
 
     def test_digenome_paired_endpoints_pass(self) -> None:
         reads = [
@@ -593,6 +636,36 @@ class NDigenomeTests(unittest.TestCase):
         self.assertEqual(rows[0]["filter_status"], "PASS")
         self.assertEqual(rows[0]["forward_position_0based"], "500")
         self.assertEqual(rows[0]["reverse_position_0based"], "500")
+        self.assertNotEqual(rows[0]["digenome_pair_score"], "")
+        self.assertNotEqual(rows[0]["rgen_digenome_score"], "")
+
+    def test_digenome_pair_score_filter_uses_explicit_reason(self) -> None:
+        reads = [
+            self.make_read(f"forward_{index}", 520) for index in range(8)
+        ]
+        reads += [
+            self.make_read(f"reverse_{index}", 471, reverse=True)
+            for index in range(8)
+        ]
+        bam = self.write_bam("digenome_low_pair_score", reads)
+        args = self.args(
+            bam,
+            "digenome_low_pair_score",
+            analysis="digenome",
+        )
+        args.digenome_pair_score_cutoff = 100.0
+
+        cleavage.run_serial_calling(args)
+
+        row = self.read_rows(
+            "digenome_low_pair_score",
+            "digenome",
+        )[0]
+        self.assertIn(
+            "LOW_DIGENOME_PAIR_SCORE",
+            row["filter_reasons"],
+        )
+        self.assertNotIn("LOW_DIGENOME_SCORE", row["filter_reasons"])
 
     def test_digenome_pair_is_excluded_when_one_endpoint_is_blacklisted(
         self,
@@ -671,9 +744,98 @@ class NDigenomeTests(unittest.TestCase):
         self.assertEqual(row["forward_position_0based"], "600")
         self.assertEqual(row["reverse_position_0based"], "596")
 
-    def test_digenome_score_formula(self) -> None:
-        score = cleavage.digenome_score(8, 0.5, 12, 0.25)
+    def test_digenome_pair_score_formula(self) -> None:
+        score = cleavage.digenome_pair_score(8, 0.5, 12, 0.25)
         self.assertAlmostEqual(score, 0.625)
+
+    def test_rgen_digenome_score_matches_five_position_float32_math(
+        self,
+    ) -> None:
+        metrics = {
+            position: {
+                "forward_endpoint_count": 1,
+                "reverse_endpoint_count": 1,
+                "total_depth": 20,
+            }
+            for position in range(95, 106)
+        }
+        metrics[100] = {
+            "forward_endpoint_count": 10,
+            "reverse_endpoint_count": 1,
+            "total_depth": 20,
+        }
+        metrics[99] = {
+            "forward_endpoint_count": 1,
+            "reverse_endpoint_count": 8,
+            "total_depth": 16,
+        }
+
+        score = cleavage.calculate_rgen_digenome_score(
+            lambda _contig, position: metrics[position],
+            "chr1",
+            2000,
+            100,
+            0,
+        )
+
+        self.assertEqual(
+            cleavage.rgen_score_contribution(10, 20, 8, 16),
+            3.1499998569488525,
+        )
+        self.assertEqual(score, 6.300000190734863)
+
+    def test_rgen_digenome_score_skips_blacklisted_positions(self) -> None:
+        metrics = {
+            position: {
+                "forward_endpoint_count": 1,
+                "reverse_endpoint_count": 1,
+                "total_depth": 20,
+            }
+            for position in range(95, 106)
+        }
+        metrics[100]["forward_endpoint_count"] = 10
+        metrics[99] = {
+            "forward_endpoint_count": 1,
+            "reverse_endpoint_count": 8,
+            "total_depth": 16,
+        }
+
+        class Mask:
+            @staticmethod
+            def contains(_contig: str, position: int) -> bool:
+                return position == 99
+
+        score = cleavage.calculate_rgen_digenome_score(
+            lambda _contig, position: metrics[position],
+            "chr1",
+            2000,
+            100,
+            0,
+            Mask(),
+        )
+
+        self.assertEqual(score, 0.0)
+
+    def test_rgen_metrics_include_supplementary_not_secondary(self) -> None:
+        reads = [
+            self.make_read("primary", 900),
+            self.make_read("supplementary", 900, extra_flag=2048),
+            self.make_read("secondary", 900, extra_flag=256),
+            self.make_read("duplicate", 900, extra_flag=1024),
+        ]
+        bam_path = self.write_bam("rgen_alignment_filter", reads)
+
+        with pysam.AlignmentFile(bam_path, "rb") as bam:
+            metrics = cleavage.measure_rgen_position(
+                bam,
+                "chr1",
+                900,
+                1,
+            )
+
+        self.assertEqual(metrics["forward_endpoint_count"], 2)
+        self.assertEqual(metrics["reverse_endpoint_count"], 0)
+        self.assertEqual(metrics["total_depth"], 2)
 
     def test_digenome_pairing_prefers_a_threshold_passing_pair(self) -> None:
         reads = [
@@ -693,7 +855,7 @@ class NDigenomeTests(unittest.TestCase):
             bam, "digenome_pair_priority", analysis="digenome"
         )
         args.digenome_depth_cutoff = 10
-        args.digenome_score_cutoff = 0.5
+        args.digenome_pair_score_cutoff = 0.5
         cleavage.run_serial_calling(args)
         row = self.read_rows("digenome_pair_priority", "digenome")[0]
         self.assertEqual(row["reverse_position_0based"], "998")
@@ -801,6 +963,14 @@ class NDigenomeTests(unittest.TestCase):
         )
         row = self.read_rows("digenome_controlled", "digenome")[0]
         self.assertEqual(row["control_status"], "MATCHED_CONTROL")
+        self.assertEqual(
+            row["digenome_pair_score"],
+            row["control_digenome_pair_score"],
+        )
+        self.assertEqual(
+            row["rgen_digenome_score"],
+            row["control_rgen_digenome_score"],
+        )
         self.assertEqual(row["classification"], "ARTIFACT_RISK")
         self.assertIn("HIGH_CONTROL_FRACTION", row["filter_reasons"])
         self.assertIn("LOW_CONTROL_FOLD", row["filter_reasons"])

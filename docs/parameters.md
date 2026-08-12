@@ -79,7 +79,7 @@ are eligible to pair when:
 abs(reverse_position - (forward_position - overhang)) <= pair_window
 ```
 
-The score is:
+The filtering score is:
 
 ```text
 forward_fraction * reverse_fraction
@@ -95,11 +95,22 @@ forward_fraction * reverse_fraction
 | `--digenome_reverse_cutoff` | Integer count | `5` | Reverse count `>` value | A cutoff of 5 requires at least 6 reverse endpoint reads. |
 | `--digenome_depth_cutoff` | Integer count | `10` | Each strand depth `>` value | Both forward and reverse local strand depths must exceed this cutoff. |
 | `--digenome_fraction_cutoff` | Fraction | `0.20` | Each endpoint fraction `>` value | Both strand-specific endpoint fractions must exceed this cutoff. |
-| `--digenome_score_cutoff` | Number | `2.5` | Score `>` value | Minimum combined Digenome score. |
+| `--digenome_pair_score_cutoff` | Number | `2.5` | Pair score `>` value | Minimum `digenome_pair_score`. |
 
 Candidate pairs are selected with deterministic one-to-one matching. Pairs
 that fail caller thresholds remain in the complete audit TSV with their
 specific filter reasons.
+
+The call TSV reports two Digenome scores:
+
+- `digenome_pair_score` is the strand-specific score above and is the only
+  score used for pairing priority and filtering.
+- `rgen_digenome_score` reproduces the standalone CRISPR RGEN Tools v1.0
+  five-position, total-depth calculation for comparison with historical
+  results. It is not used for filtering.
+
+Matched-control rows report the independently measured
+`control_digenome_pair_score` and `control_rgen_digenome_score`.
 
 ## nDigenome parameters
 
