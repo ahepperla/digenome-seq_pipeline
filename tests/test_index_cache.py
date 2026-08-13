@@ -37,6 +37,14 @@ if [[ "$1" == "version" ]]; then
 fi
 if [[ "$1" == "index" && "$2" == "-p" ]]; then
   prefix=$3
+  if [[ -n "${FAKE_BWA_STARTED:-}" ]]; then
+    : > "$FAKE_BWA_STARTED"
+  fi
+  if [[ -n "${FAKE_BWA_RELEASE:-}" ]]; then
+    while [[ ! -e "$FAKE_BWA_RELEASE" ]]; do
+      sleep 0.05
+    done
+  fi
   for suffix in .0123 .amb .ann .bwt.2bit.64 .pac; do
     printf 'index\\n' > "${prefix}${suffix}"
   done
@@ -57,36 +65,55 @@ exit 2
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def run_helper(
+    def helper_environment(
         self,
-        stale_seconds: int = 172800,
         simd: str = "avx2",
         version: str = "2.3-test",
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> dict[str, str]:
         environment = os.environ.copy()
         environment["PATH"] = f"{self.bin_dir}:{environment['PATH']}"
         environment["FAKE_BWA_COUNT"] = str(self.count_file)
         environment["FAKE_BWA_SIMD"] = simd
         environment["FAKE_BWA_VERSION"] = version
+        return environment
+
+    def helper_command(
+        self,
+        stale_seconds: int = 172800,
+    ) -> list[str]:
+        return [
+            str(INDEX_HELPER),
+            "--genome",
+            "tiny",
+            "--fasta",
+            str(self.fasta),
+            "--cache-dir",
+            str(self.cache),
+            "--ready",
+            str(self.ready),
+            "--lock-timeout-seconds",
+            "1",
+            "--stale-lock-seconds",
+            str(stale_seconds),
+        ]
+
+    def run_helper(
+        self,
+        stale_seconds: int = 172800,
+        simd: str = "avx2",
+        version: str = "2.3-test",
+        umask: int | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [
-                str(INDEX_HELPER),
-                "--genome",
-                "tiny",
-                "--fasta",
-                str(self.fasta),
-                "--cache-dir",
-                str(self.cache),
-                "--ready",
-                str(self.ready),
-                "--lock-timeout-seconds",
-                "1",
-                "--stale-lock-seconds",
-                str(stale_seconds),
-            ],
+            self.helper_command(stale_seconds),
             text=True,
             capture_output=True,
-            env=environment,
+            env=self.helper_environment(simd, version),
+            preexec_fn=(
+                (lambda: os.umask(umask))
+                if umask is not None
+                else None
+            ),
             check=False,
         )
 
@@ -109,6 +136,80 @@ exit 2
         self.assertEqual(self.ready_values()["bwa_mem2_version"], "2.3-test")
         for suffix in SUFFIXES:
             self.assertTrue(Path(prefix + suffix).stat().st_size > 0)
+
+    def test_shared_cache_permissions_override_restrictive_umask(
+        self,
+    ) -> None:
+        result = self.run_helper(umask=0o077)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        prefix = Path(self.ready_values()["index_prefix"])
+        final_directory = prefix.parent
+        version_directory = final_directory.parent
+        fingerprint_directory = version_directory.parent
+        genome_directory = fingerprint_directory.parent
+        expected_directory_modes = {
+            self.cache: 0o1777,
+            genome_directory: 0o1777,
+            fingerprint_directory: 0o1777,
+            version_directory: 0o1777,
+            final_directory: 0o755,
+        }
+        for path, expected_mode in expected_directory_modes.items():
+            with self.subTest(path=path):
+                self.assertEqual(
+                    path.stat().st_mode & 0o7777,
+                    expected_mode,
+                )
+
+        for path in final_directory.iterdir():
+            with self.subTest(path=path):
+                self.assertTrue(path.is_file())
+                self.assertEqual(path.stat().st_mode & 0o7777, 0o644)
+
+        second_version = self.run_helper(
+            version="2.4-test",
+            umask=0o077,
+        )
+        self.assertEqual(
+            second_version.returncode,
+            0,
+            second_version.stderr,
+        )
+        self.assertIn(
+            "/2.4-test/bwamem2/",
+            self.ready_values()["index_prefix"],
+        )
+
+    def test_build_lock_is_readable_with_restrictive_umask(self) -> None:
+        started = self.tmp / "build.started"
+        release = self.tmp / "build.release"
+        environment = self.helper_environment()
+        environment["FAKE_BWA_STARTED"] = str(started)
+        environment["FAKE_BWA_RELEASE"] = str(release)
+        process = subprocess.Popen(
+            self.helper_command(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            preexec_fn=lambda: os.umask(0o077),
+        )
+        digest = hashlib.sha256(self.fasta.read_bytes()).hexdigest()
+        lock = self.cache / "tiny" / f".{digest}.2.3-test.build.lock"
+        owner = lock / "owner.tsv"
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline and not started.exists():
+                time.sleep(0.05)
+            self.assertTrue(started.exists())
+            self.assertTrue(owner.is_file())
+            self.assertEqual(lock.stat().st_mode & 0o7777, 0o755)
+            self.assertEqual(owner.stat().st_mode & 0o7777, 0o644)
+        finally:
+            release.touch()
+            stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0, stderr or stdout)
 
     def test_cpu_dispatch_message_does_not_invalidate_index(self) -> None:
         first = self.run_helper(simd="avx2")

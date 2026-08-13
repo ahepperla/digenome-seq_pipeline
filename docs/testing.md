@@ -38,6 +38,7 @@ Coverage includes:
 - FASTA fingerprint changes
 - partial index quarantine
 - stale local lock recovery
+- shared cache and lock permissions under a restrictive user umask
 - static workflow/container contracts
 
 ## Smoke test

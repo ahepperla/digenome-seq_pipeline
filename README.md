@@ -319,6 +319,26 @@ index only when its genome name, FASTA hash, stable bwa-mem2 version, and
 required index files match. Concurrent runs use a lock, so one run builds
 while the other waits and then reuses the completed index.
 
+The index helper sets shared-cache permissions explicitly instead of relying
+on user umask or default ACL inheritance. Because the cache key includes both
+the FASTA hash and bwa-mem2 version, each namespace directory through the
+version level is mode `1777`:
+
+```text
+<ref_cache>/                         1777
+<ref_cache>/<genome>/                1777
+<ref_cache>/<genome>/<fasta_sha256>/ 1777
+.../<bwa_mem2_version>/              1777
+.../<bwa_mem2_version>/bwamem2/      755
+.../bwamem2/index files              644
+```
+
+The sticky bit lets users create independent cache keys without deleting or
+renaming entries owned by another user. Completed index directories are
+globally readable/traversable but writable only by their creator. Build-lock
+directories and owner records are also globally readable so concurrent users
+can identify the active builder.
+
 ## Outputs
 
 Mode-specific outputs:

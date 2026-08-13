@@ -60,6 +60,45 @@ file_mtime() {
     fi
 }
 
+path_mode() {
+    if stat -c %a "$1" >/dev/null 2>&1; then
+        stat -c %a "$1"
+    else
+        stat -f %Lp "$1"
+    fi
+}
+
+ensure_directory_mode() {
+    local path=$1
+    local mode=$2
+    local label=$3
+    local current_mode
+
+    mkdir -p "$path" || {
+        echo "ERROR: could not create $label: $path" >&2
+        exit 1
+    }
+    current_mode=$(path_mode "$path")
+    if [[ "$current_mode" != "$mode" ]] && ! chmod "$mode" "$path"; then
+        echo "ERROR: $label must have mode $mode but is $current_mode: $path" \
+            >&2
+        exit 1
+    fi
+}
+
+normalize_completed_index_permissions() {
+    local directory=$1
+
+    if ! find "$directory" -type d -exec chmod 755 {} +; then
+        echo "ERROR: could not make index directories globally traversable: $directory" >&2
+        exit 1
+    fi
+    if ! find "$directory" -type f -exec chmod 644 {} +; then
+        echo "ERROR: could not make index files globally readable: $directory" >&2
+        exit 1
+    fi
+}
+
 index_complete() {
     local prefix=$1
     local suffix
@@ -91,7 +130,8 @@ parse_bwa_version() {
 }
 
 fasta=$(cd "$(dirname "$fasta")" && pwd -P)/$(basename "$fasta")
-cache_dir=$(mkdir -p "$cache_dir" && cd "$cache_dir" && pwd -P)
+ensure_directory_mode "$cache_dir" 1777 "reference cache root"
+cache_dir=$(cd "$cache_dir" && pwd -P)
 fasta_sha256=$(sha256_file "$fasta")
 fasta_size=$(file_size "$fasta")
 fasta_mtime=$(file_mtime "$fasta")
@@ -112,7 +152,7 @@ legacy_manifest="${legacy_final_dir}/index.complete.tsv"
 lock_dir="${genome_root}/.${fasta_sha256}.${bwa_version}.build.lock"
 owner_file="${lock_dir}/owner.tsv"
 
-mkdir -p "$genome_root"
+ensure_directory_mode "$genome_root" 1777 "genome cache namespace"
 [[ -w "$genome_root" ]] || {
     echo "ERROR: reference cache is not writable: $genome_root" >&2
     exit 1
@@ -140,11 +180,11 @@ migrate_unversioned_index() {
         return 1
     fi
 
-    mkdir -p "$version_dir"
     if ! cp -al "$legacy_final_dir" "$final_dir"; then
         rm -rf "$final_dir"
         return 1
     fi
+    normalize_completed_index_permissions "$final_dir"
     echo "Migrated unversioned bwa-mem2 index cache: $final_dir"
 }
 
@@ -187,6 +227,7 @@ EOF
         echo "ERROR: could not publish migrated index metadata: $manifest" >&2
         exit 1
     }
+    normalize_completed_index_permissions "$final_dir"
     echo "Updated legacy bwa-mem2 version metadata: $manifest"
 }
 
@@ -257,6 +298,11 @@ while ! mkdir "$lock_dir" 2>/dev/null; do
 done
 
 lock_owned=true
+chmod 755 "$lock_dir" || {
+    echo "ERROR: could not make the index lock globally readable: $lock_dir" \
+        >&2
+    exit 1
+}
 cat > "$owner_file" <<EOF
 hostname	$(hostname)
 pid	$$
@@ -264,11 +310,18 @@ created_epoch	$(date +%s)
 genome	${genome}
 fasta_sha256	${fasta_sha256}
 EOF
+chmod 644 "$owner_file" || {
+    echo "ERROR: could not make the index lock owner record readable: $owner_file" \
+        >&2
+    exit 1
+}
 
 if manifest_matches; then
     write_ready
     exit 0
 fi
+ensure_directory_mode "$fingerprint_dir" 1777 "FASTA cache namespace"
+ensure_directory_mode "$version_dir" 1777 "bwa-mem2 version namespace"
 migrate_unversioned_index || true
 migrate_legacy_manifest || true
 if manifest_matches; then
@@ -296,7 +349,7 @@ bwa_mem2_version	${bwa_version}
 created_utc	$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
-mkdir -p "$version_dir"
+normalize_completed_index_permissions "$tmp_dir"
 if [[ -e "$final_dir" ]]; then
     quarantine="${version_dir}/bwamem2.incomplete.$(date -u +%Y%m%dT%H%M%SZ).$$"
     echo "Moving incomplete index aside: $quarantine" >&2
