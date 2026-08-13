@@ -337,7 +337,9 @@ The sticky bit lets users create independent cache keys without deleting or
 renaming entries owned by another user. Completed index directories are
 globally readable/traversable but writable only by their creator. Build-lock
 directories and owner records are also globally readable so concurrent users
-can identify the active builder.
+can identify the active builder. Project filesystems may additionally preserve
+setgid, producing modes such as `3777` or `2755`; the helper accepts that
+additional group-inheritance bit.
 
 ## Outputs
 

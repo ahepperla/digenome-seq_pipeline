@@ -181,6 +181,38 @@ exit 2
             self.ready_values()["index_prefix"],
         )
 
+    def test_setgid_modes_satisfy_production_mode_check(self) -> None:
+        helper_text = INDEX_HELPER.read_text()
+        start = helper_text.index("mode_satisfies_requirement() {")
+        end = helper_text.index(
+            "\n}\n\nensure_directory_mode()",
+            start,
+        ) + 2
+        function_text = helper_text[start:end]
+
+        for current, required, expected in (
+            ("3777", "1777", True),
+            ("2755", "755", True),
+            ("1777", "1777", True),
+            ("0777", "1777", False),
+            ("1775", "1777", False),
+            ("5777", "1777", False),
+        ):
+            with self.subTest(current=current, required=required):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        (
+                            f"{function_text}\n"
+                            "mode_satisfies_requirement "
+                            f"{current} {required}"
+                        ),
+                    ],
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, expected)
+
     def test_build_lock_is_readable_with_restrictive_umask(self) -> None:
         started = self.tmp / "build.started"
         release = self.tmp / "build.release"

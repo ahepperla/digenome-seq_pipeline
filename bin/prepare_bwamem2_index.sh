@@ -68,6 +68,16 @@ path_mode() {
     fi
 }
 
+mode_satisfies_requirement() {
+    local current_mode=$1
+    local required_mode=$2
+    local current_value=$((8#$current_mode))
+    local required_value=$((8#$required_mode))
+    local setgid_value=$((8#2000))
+
+    (( (current_value & ~setgid_value) == required_value ))
+}
+
 ensure_directory_mode() {
     local path=$1
     local mode=$2
@@ -79,7 +89,8 @@ ensure_directory_mode() {
         exit 1
     }
     current_mode=$(path_mode "$path")
-    if [[ "$current_mode" != "$mode" ]] && ! chmod "$mode" "$path"; then
+    if ! mode_satisfies_requirement "$current_mode" "$mode" \
+        && ! chmod "$mode" "$path"; then
         echo "ERROR: $label must have mode $mode but is $current_mode: $path" \
             >&2
         exit 1
