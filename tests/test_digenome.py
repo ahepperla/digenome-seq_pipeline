@@ -23,7 +23,6 @@ from helpers import (
     write_vcf,
     run_caller,
     make_settings,
-    SITE_SETTINGS,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
@@ -34,7 +33,6 @@ from cleavage.digenome import (
     PairCandidate,
     select_pairs,
 )
-from cleavage.output import format_value
 
 
 @unittest.skipIf(pysam is None, "pysam is not installed")

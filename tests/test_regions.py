@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import helpers  # noqa: E402,F401  (puts bin/ on sys.path)
 
 from cleavage.regions import (  # noqa: E402
-    Blacklist,
     load_blacklist,
     plan_chunks,
     check_plan,

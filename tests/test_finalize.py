@@ -18,9 +18,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import (
     make_read,
-    reverse_read_ending_at,
     forward_background,
-    reverse_background,
     write_bam,
     write_vcf,
     run_caller,
@@ -31,7 +29,6 @@ from helpers import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from cleavage.call import call_chunk
 from cleavage.finalize import finalize
-from cleavage.output import format_value
 from cleavage.stats import benjamini_hochberg
 
 
@@ -85,120 +82,45 @@ class FinalizeTests(unittest.TestCase):
         return reads
 
     def test_serial_and_chunked_outputs_are_equivalent(self) -> None:
-        """Multi-contig with control, VCF, blacklist: chunks=1 and chunks=2,3,4,6 are identical."""
-        # Build multi-contig treated and control BAMs
-        treated_reads = self.endpoint_site_reads(0, 500, 8, "chr1")
-        treated_reads += self.endpoint_site_reads(1, 700, 6, "chr2")
-        treated_reads += [
-            make_read(f"chr3_bg_{i}", 100 + i * 3, contig=2, mapq=0)
-            for i in range(12)
-        ]
-        control_reads = self.control_site_reads(0, 500, "chr1_ctrl")
-        control_reads += self.control_site_reads(1, 700, "chr2_ctrl")
-        control_reads += [
-            make_read(f"chr3_ctrl_{i}", 200 + i * 3, contig=2, mapq=0)
-            for i in range(12)
-        ]
+        """The chunk count changes runtime, never results (AGENTS.md). Uses the
+        multi-contig golden scenario: controls, a known indel, a blacklisted
+        site, and chr10 before chr3 in the header."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "golden"))
+        from scenarios import multi_contig
 
-        treated_bam = write_bam(
-            self.tmp / "treated.bam",
-            [("chr1", 2000), ("chr2", 2000), ("chr3", 2000)],
-            treated_reads,
-        )
-        control_bam = write_bam(
-            self.tmp / "control.bam",
-            [("chr1", 2000), ("chr2", 2000), ("chr3", 2000)],
-            control_reads,
-        )
-        vcf = write_vcf(
-            self.tmp / "variants.vcf.gz",
-            [("chr1", 2000), ("chr2", 2000), ("chr3", 2000)],
-            ["chr2\t701\t.\tAA\tA\t60\tPASS\t."],
-        )
-        blacklist = self.tmp / "blacklist.bed"
-        blacklist.write_text("chr1\t490\t510\n")
+        scenario = multi_contig()
+        inputs = scenario.write_inputs(self.tmp / "inputs")
+        for analysis, expected_rows in (("digenome", 3), ("ndigenome", 7)):
+            settings = make_settings(analysis, base=scenario.settings)
+            serial_prefix, serial_qc = run_caller(settings, inputs, self.tmp / f"{analysis}_1", chunks=1)
+            self.assertEqual(serial_qc["rows"], expected_rows)
+            for chunks in (2, 3, 4, 6):
+                with self.subTest(analysis=analysis, chunks=chunks):
+                    prefix, qc = run_caller(settings, inputs, self.tmp / f"{analysis}_{chunks}", chunks=chunks)
+                    for suffix in ("all.tsv", "high_confidence.tsv", "manual_review.tsv", "artifact.tsv", "bed"):
+                        self.assertEqual(
+                            Path(f"{prefix}.{analysis}.{suffix}").read_bytes(),
+                            Path(f"{serial_prefix}.{analysis}.{suffix}").read_bytes(),
+                            suffix,
+                        )
+                    self.assertEqual(
+                        Path(f"{prefix}.{analysis}_mqc.tsv").read_bytes(),
+                        Path(f"{serial_prefix}.{analysis}_mqc.tsv").read_bytes(),
+                    )
+                    for key in ("rows", "tiers", "candidates_before_filters"):
+                        self.assertEqual(qc[key], serial_qc[key], key)
+            self.check_sample_wide_q_values(Path(f"{serial_prefix}.{analysis}.all.tsv"), expected_rows)
 
-        settings = make_settings("digenome", base=CHUNK_SETTINGS)
-
-        # Serial run with chunks=1
-        serial_prefix = self.tmp / "serial"
-        serial_prefix, serial_qc = run_caller(
-            settings,
-            {
-                "bam": treated_bam,
-                "control_bam": control_bam,
-                "vcf": vcf,
-                "blacklist": blacklist,
-            },
-            self.tmp / "serial_out",
-            chunks=1,
-            sample="Sample",
-            control_sample="Control",
-        )
-
-        # Chunked runs with various chunk counts
-        for chunk_count in [2, 3, 4, 6]:
-            with self.subTest(chunks=chunk_count):
-                chunked_prefix = self.tmp / f"chunked_{chunk_count}"
-                chunked_prefix, chunked_qc = run_caller(
-                    settings,
-                    {
-                        "bam": treated_bam,
-                        "control_bam": control_bam,
-                        "vcf": vcf,
-                        "blacklist": blacklist,
-                    },
-                    self.tmp / f"chunked_{chunk_count}_out",
-                    chunks=chunk_count,
-                    sample="Sample",
-                    control_sample="Control",
-                )
-
-                # Check all output files are byte-identical
-                for suffix in [
-                    ".digenome.all.tsv",
-                    ".digenome.high_confidence.tsv",
-                    ".digenome.manual_review.tsv",
-                    ".digenome.artifact.tsv",
-                    ".digenome.bed",
-                    ".digenome_mqc.tsv",
-                ]:
-                    with self.subTest(suffix=suffix):
-                        serial_path = Path(f"{serial_prefix}{suffix}")
-                        chunked_path = Path(f"{chunked_prefix}{suffix}")
-                        if serial_path.exists() and chunked_path.exists():
-                            self.assertEqual(
-                                serial_path.read_bytes(),
-                                chunked_path.read_bytes(),
-                                f"Mismatch in {suffix}",
-                            )
-
-                # Check QC stats match
-                self.assertEqual(serial_qc["rows"], chunked_qc["rows"])
-                self.assertEqual(serial_qc["tiers"], chunked_qc["tiers"])
-                self.assertEqual(
-                    serial_qc["candidates_before_filters"],
-                    chunked_qc["candidates_before_filters"],
-                )
-
-                # Verify q-values match benjamini_hochberg
-                all_tsv_path = Path(f"{chunked_prefix}.digenome.all.tsv")
-                with all_tsv_path.open(newline="") as handle:
-                    rows = list(csv.DictReader(handle, delimiter="\t"))
-                p_values = [
-                    float(row["control_fisher_p"])
-                    for row in rows
-                    if row["control_fisher_p"]
-                ]
-                if p_values:
-                    q_values = [
-                        float(row["control_fisher_q"])
-                        for row in rows
-                        if row["control_fisher_q"]
-                    ]
-                    expected_q = benjamini_hochberg(p_values)
-                    for observed, wanted in zip(q_values, expected_q):
-                        self.assertAlmostEqual(observed, wanted)
+    def check_sample_wide_q_values(self, path: Path, expected_rows: int) -> None:
+        """Every row has a matched control, and q is BH over all of them."""
+        with path.open(newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual([row["control_status"] for row in rows], ["MATCHED_CONTROL"] * expected_rows)
+        p_values = [float(row["control_fisher_p"]) for row in rows]
+        q_values = [float(row["control_fisher_q"]) for row in rows]
+        for observed, wanted in zip(q_values, benjamini_hochberg(p_values), strict=True):
+            # p is written with 8 significant digits, so allow that rounding.
+            self.assertAlmostEqual(observed, wanted, delta=1e-7 * wanted)
 
     def test_conflict_chain_across_chunk_boundary(self) -> None:
         """Chain 980..1020 step 2 with 5 reads each: chunks=2 == chunks=1."""
