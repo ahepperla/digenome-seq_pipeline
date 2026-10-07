@@ -67,8 +67,8 @@ class CompareToControlTests(unittest.TestCase):
     def test_control_depth_equal_to_minimum_returns_matched_status(self) -> None:
         status, fold, p = compare_to_control(10, 20, 5, 20, min_control_depth=20)
         self.assertEqual(status, MATCHED_CONTROL)
-        self.assertIsNotNone(fold)
-        self.assertIsNotNone(p)
+        self.assertEqual(fold, ((10 + 0.5) / 21) / ((5 + 0.5) / 21))
+        self.assertEqual(p, fisher_exact_two_sided(10, 10, 5, 15))
 
     def test_fold_enrichment_formula(self) -> None:
         status, fold, p = compare_to_control(10, 20, 0, 30, min_control_depth=1)

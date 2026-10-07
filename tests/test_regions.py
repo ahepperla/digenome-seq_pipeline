@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from helpers import write_bam, make_read  # noqa: E402
+import helpers  # noqa: E402,F401  (puts bin/ on sys.path)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from cleavage.regions import (  # noqa: E402
     Blacklist,
     load_blacklist,
@@ -77,8 +77,7 @@ class LoadBlacklistTests(unittest.TestCase):
         blacklist = load_blacklist(path, self.contig_lengths)
         prov = blacklist.provenance()
         self.assertEqual(prov["file"], "blacklist.bed")
-        self.assertIn("sha256", prov)
-        self.assertEqual(len(prov["sha256"]), 64)
+        self.assertEqual(prov["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
         self.assertEqual(prov["intervals"], 2)
         self.assertEqual(prov["excluded_bases"], 185)
 
@@ -134,31 +133,33 @@ class PlanChunksTests(unittest.TestCase):
             MappedContig("chr2", 2000, 5),
             MappedContig("chr3", 2000, 3),
         ]
-        plan = plan_chunks(contigs, 2, None)
-        self.assertEqual(len(plan), 2)
-        self.assertEqual(len(plan[0]), 1)
-        self.assertEqual(plan[0][0].contig, "chr1")
-        self.assertEqual(plan[0][0].start, 0)
-        self.assertEqual(plan[0][0].end, 2000)
-        self.assertEqual(plan[0][0].callable_bases, 2000)
-        self.assertEqual(len(plan[1]), 2)
-        self.assertTrue(any(i.contig == "chr2" for i in plan[1]))
-        self.assertTrue(any(i.contig == "chr3" for i in plan[1]))
+        self.assertEqual(
+            plan_chunks(contigs, 2, None),
+            [
+                [OwnedInterval("chr1", 0, 2000, 2000)],
+                [OwnedInterval("chr2", 0, 2000, 2000), OwnedInterval("chr3", 0, 2000, 2000)],
+            ],
+        )
 
-    def test_planner_splits_large_contigs_across_many_chunks(self) -> None:
+    def test_planner_splits_large_contigs_by_mapped_records(self) -> None:
         contigs = [
             MappedContig("chr1", 2000, 8),
             MappedContig("chr2", 2000, 5),
             MappedContig("chr3", 2000, 3),
         ]
         plan = plan_chunks(contigs, 20, None)
-        self.assertEqual(len(plan), 20)
-        non_empty = [slot for slot in plan if slot]
-        self.assertGreater(len(non_empty), 1)
-        self.assertTrue(any(i.start > 0 or i.end < 2000 for slot in plan for i in slot))
         check_plan(plan, {"chr1": 2000, "chr2": 2000, "chr3": 2000})
+        # 16 records over 20 slots: 0.8 records, i.e. 200 bp of chr1, per slot.
+        self.assertEqual([len(slot) for slot in plan], [1] * 16 + [2] + [1] * 3)
+        self.assertEqual(plan[0], [OwnedInterval("chr1", 0, 200, 200)])
+        self.assertEqual(plan[10], [OwnedInterval("chr2", 0, 320, 320)])
+        self.assertEqual(
+            plan[16],
+            [OwnedInterval("chr2", 1920, 2000, 80), OwnedInterval("chr3", 0, 400, 400)],
+        )
+        self.assertEqual(plan[19], [OwnedInterval("chr3", 1467, 2000, 533)])
 
-    def test_planner_with_blacklist_reduces_callable_bases(self) -> None:
+    def test_planner_balances_blacklist_adjusted_callable_work(self) -> None:
         path = self.tmp / "blacklist.bed"
         path.write_text("chr1\t0\t1800\n")
         blacklist = load_blacklist(path, {"chr1": 2000, "chr2": 2000})
@@ -166,29 +167,20 @@ class PlanChunksTests(unittest.TestCase):
             MappedContig("chr1", 2000, 100),
             MappedContig("chr2", 2000, 100),
         ]
-        plan = plan_chunks(contigs, 2, blacklist)
-        self.assertEqual(len(plan), 2)
-        callable_sum = sum(
-            i.callable_bases for slot in plan for i in slot
+        self.assertEqual(
+            plan_chunks(contigs, 2, blacklist),
+            [
+                [OwnedInterval("chr1", 0, 2000, 200), OwnedInterval("chr2", 0, 900, 900)],
+                [OwnedInterval("chr2", 900, 2000, 1100)],
+            ],
         )
-        self.assertEqual(callable_sum, 2200)
 
     def test_planner_handles_fully_blacklisted_mapped_contig(self) -> None:
         path = self.tmp / "fully_blacklist.bed"
         path.write_text("chr1\t0\t2000\n")
         blacklist = load_blacklist(path, {"chr1": 2000})
-        contigs = [MappedContig("chr1", 2000, 10)]
-        plan = plan_chunks(contigs, 8, blacklist)
-        self.assertEqual(len(plan), 8)
-        found_interval = None
-        for slot in plan:
-            if slot:
-                self.assertEqual(len(slot), 1)
-                found_interval = slot[0]
-        self.assertIsNotNone(found_interval)
-        self.assertEqual(found_interval.start, 0)
-        self.assertEqual(found_interval.end, 2000)
-        self.assertEqual(found_interval.callable_bases, 0)
+        plan = plan_chunks([MappedContig("chr1", 2000, 10)], 8, blacklist)
+        self.assertEqual(plan, [[OwnedInterval("chr1", 0, 2000, 0)]] + [[]] * 7)
 
     def test_planner_produces_deterministic_output(self) -> None:
         contigs = [
