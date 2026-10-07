@@ -18,7 +18,7 @@ mkdir -p bench/legacy_src
 git archive b9455e2 bin | tar -x -C bench/legacy_src
 
 sbatch -n 1 --mem=32g -t 48:00:00 -o bench/digenome.log --wrap "\
-  apptainer exec --bind /proj --bind /work --bind /users \
+  apptainer exec --bind /proj --bind /work --bind /users --bind /vast --bind /hickory \
     containers/cleavage_pysam_v0.23.3.sif \
     python3 tests/benchmark/benchmark.py \
       --legacy-bin bench/legacy_src/bin \

@@ -82,7 +82,7 @@ nextflow run . -profile apptainer,test --long_reads --input smoke_long_reads.csv
 ## What only Longleaf can show
 
 - SLURM submission and accounting
-- Longleaf paths and mounts (`/proj`, `/work`, `/users`, `/overflow`, `/nas`)
+- Longleaf paths and mounts (`/proj`, `/work`, `/users`, `/overflow`, `/nas`, `/vast`, `/hickory`)
 - the production images
 - full-depth runtime
 - biological sensitivity and specificity
