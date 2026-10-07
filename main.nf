@@ -1,1011 +1,367 @@
 #!/usr/bin/env nextflow
+/*
+ * Digenome-seq (DSB) and nDigenome-seq (SSB) cleavage calling from Illumina WGS.
+ *
+ *   SAMPLESHEET -> PREPARE_INDEX -> FASTP -> ALIGN -> CALL_CHUNK (n per sample)
+ *   -> FINALIZE -> MULTIQC
+ *
+ * Calling rules live in bin/cleavage/ and docs/cleavage_algorithm.md.
+ */
 
-import groovy.json.JsonOutput
+include { validateParameters } from 'plugin/nf-schema'
 
-nextflow.enable.dsl = 2
+workflow {
+    validateParameters()
+    def fasta = genomeFasta()
+    def settings = callerSettings()
+    writeRunInfo(fasta, settings)
 
-def shellQuote = { value ->
-    "'${value.toString().replace("'", "'\"'\"'")}'"
-}
-
-def absoluteHostPath = { value ->
-    def text = value?.toString()?.trim()
-    text ? file(text).toAbsolutePath().normalize().toString() : ''
-}
-
-def jsonSafe
-jsonSafe = { value ->
-    if (
-        value == null
-        || value instanceof Boolean
-        || value instanceof Number
-        || value instanceof String
-    ) {
-        return value
-    }
-    if (value instanceof Map) {
-        return value.collectEntries { key, item ->
-            [(key.toString()): jsonSafe(item)]
+    def code = files("${projectDir}/bin/cleavage/*.py")
+    def samples = SAMPLESHEET(file(params.input), code)
+        .splitJson()
+        .map { record ->
+            def meta = [
+                sample: record.sample,
+                single_end: record.single_end,
+                control: record.control,
+                is_control: record.is_control,
+            ]
+            def vcf = record.variant_vcf ? [file(record.variant_vcf), file(record.variant_index)] : [[], []]
+            tuple(meta, record.fastq_1.collect { path -> file(path) }, record.fastq_2.collect { path -> file(path) }, vcf)
         }
+
+    def index_prefix = PREPARE_INDEX(params.genome, fasta, params.ref_cache, file("${projectDir}/bin/prepare_bwamem2_index.sh"))
+        .map { output -> output.trim() }
+
+    FASTP(samples.map { meta, fastq_1, fastq_2, _vcf -> tuple(meta, fastq_1, fastq_2) })
+    ALIGN(FASTP.out.reads, index_prefix)
+
+    // Controls are aligned but not called; each treated sample is called
+    // against its named control, or with empty placeholders when it has none.
+    def vcfs = samples.map { meta, _fastq_1, _fastq_2, vcf -> tuple(meta.sample, vcf) }
+    def bams = ALIGN.out.bam.branch { meta, _bam, _bai ->
+        control: meta.is_control
+        treated: true
     }
-    if (value instanceof Collection) {
-        return value.collect { jsonSafe(it) }
-    }
-    value.toString()
-}
+    def controls = bams.control.map { meta, bam, bai -> tuple(meta.sample, bam, bai) }
+    def treated = bams.treated
+        .map { meta, bam, bai -> tuple(meta.sample, meta, bam, bai) }
+        .join(vcfs)
+        .map { _name, meta, bam, bai, vcf -> tuple(meta.control, meta, bam, bai, vcf) }
+    def controlled = treated
+        .filter { control, _meta, _bam, _bai, _vcf -> control }
+        .combine(controls, by: 0)
+        .map { _control, meta, bam, bai, vcf, control_bam, control_bai -> tuple(meta, bam, bai, control_bam, control_bai, vcf[0], vcf[1]) }
+    def uncontrolled = treated
+        .filter { control, _meta, _bam, _bai, _vcf -> !control }
+        .map { _control, meta, bam, bai, vcf -> tuple(meta, bam, bai, [], [], vcf[0], vcf[1]) }
+    def chunk_jobs = controlled.mix(uncontrolled).combine(channel.of(0..<params.cleavage_chunks))
 
-def resolvedContainer = { value ->
-    def text = value?.toString()?.trim()
-    if (
-        !text
-        || text.contains('://')
-        || (
-            !text.startsWith('/')
-            && !text.startsWith('.')
-            && !text.endsWith('.sif')
-        )
-    ) {
-        return text
-    }
-    absoluteHostPath(text)
-}
+    def blacklist = params.genome_blacklist ? file(params.genome_blacklist) : []
+    CALL_CHUNK(chunk_jobs, blacklist, code, groovy.json.JsonOutput.toJson(settings))
+    FINALIZE(CALL_CHUNK.out.groupTuple(size: params.cleavage_chunks), code, groovy.json.JsonOutput.toJson(settings))
 
-def genomeLabel = { String genomeName, genomeConfig ->
-    def aliases = genomeConfig.aliases ?: []
-    aliases ? "${genomeName} (aliases: ${aliases.join(', ')})" : genomeName
-}
-
-def resolveGenome = { String requestedGenome ->
-    def requestedLower = requestedGenome.toLowerCase()
-    def matches = []
-    params.genomes.each { genomeName, genomeConfig ->
-        def names = [genomeName as String] +
-            ((genomeConfig.aliases ?: []) as List).collect { it as String }
-        if (names.collect { it.toLowerCase() }.contains(requestedLower)) {
-            matches << (genomeName as String)
-        }
-    }
-    matches = matches.unique()
-    if (matches.size() > 1) {
-        error "Genome name/alias '${requestedGenome}' is ambiguous and matches: " +
-            "${matches.join(', ')}. Fix duplicate aliases in nextflow.config."
-    }
-    matches ? matches[0] : null
-}
-
-def requireContainer = { String name ->
-    def configured = params.containers[name]
-    if (!configured) {
-        error "Missing required container configuration: params.containers.${name}"
-    }
-    def text = configured as String
-    if (text.startsWith('/') && !file(text).exists()) {
-        error "Configured ${name} container does not exist: ${text}"
-    }
-}
-
-if (!params.input) {
-    error "Missing required parameter: --input samplesheet.csv"
-}
-if (!params.genome) {
-    error "Missing required parameter: --genome"
-}
-if (!params.ref_cache) {
-    error "Missing required config value: params.ref_cache"
-}
-String input_path = absoluteHostPath(params.input)
-String outdir_path = absoluteHostPath(params.outdir)
-String ref_cache_path = absoluteHostPath(params.ref_cache)
-String genome_blacklist_path = params.genome_blacklist ?
-    absoluteHostPath(params.genome_blacklist) : ''
-boolean has_genome_blacklist = genome_blacklist_path != ''
-
-String selected_analysis = (params.analysis ?: 'digenome').toString().toLowerCase()
-if (!(selected_analysis in ['digenome', 'ndigenome'])) {
-    error "Unknown --analysis '${params.analysis}'. Expected: digenome or ndigenome"
-}
-
-boolean keep_multimappers = params.keep_multimappers as Boolean
-int cleavage_chunks = params.cleavage_chunks as int
-if (cleavage_chunks < 1) {
-    error "--cleavage_chunks must be at least 1"
-}
-// Cover a pair plus one-step neighboring endpoints that can compete for it.
-int digenome_chunk_context =
-    Math.abs(params.digenome_overhang as int) +
-    3 * (params.digenome_pair_window as int)
-int cleavage_chunk_padding = [
-    params.cleavage_artifact_window as int,
-    params.ndigenome_opposite_window as int,
-    digenome_chunk_context
-].max() as int
-int effective_digenome_min_mapq = keep_multimappers ?
-    0 : params.digenome_min_mapq as int
-int effective_ndigenome_min_mapq = keep_multimappers ?
-    0 : params.ndigenome_min_mapq as int
-double effective_min_support_mean_mapq = keep_multimappers ?
-    0.0 : params.cleavage_min_support_mean_mapq as double
-
-if (keep_multimappers) {
-    log.info(
-        "--keep_multimappers enabled: using MAPQ 0 primary alignments and " +
-        "disabling the support mean-MAPQ filter; secondary alignments remain diagnostic."
+    MULTIQC(
+        FASTP.out.qc
+            .mix(ALIGN.out.qc.flatten())
+            .mix(FINALIZE.out.multiqc)
+            .collect()
     )
 }
 
-['python', 'fastp', 'align', 'cleavage', 'multiqc'].each {
-    requireContainer(it)
-}
-
-String requested_genome = params.genome as String
-String selected_genome = resolveGenome(requested_genome)
-if (!selected_genome) {
-    def available = params.genomes.collect { genomeName, genomeConfig ->
-        genomeLabel(genomeName as String, genomeConfig)
-    }.join('; ')
-    error "Unknown --genome '${requested_genome}'. Available genomes/aliases: ${available}"
-}
-
-String selected_fasta = params.genomes[selected_genome].fasta as String
-if (!selected_fasta || selected_fasta == 'null') {
-    error "Genome '${selected_genome}' does not have a configured FASTA"
-}
-selected_fasta = absoluteHostPath(selected_fasta)
-
-def preflight_parameters = jsonSafe(params)
-preflight_parameters.input = input_path
-preflight_parameters.outdir = outdir_path
-preflight_parameters.ref_cache = ref_cache_path
-preflight_parameters.genome_blacklist = (
-    has_genome_blacklist ? genome_blacklist_path : null
-)
-preflight_parameters.genomes = preflight_parameters.genomes.collectEntries {
-    genome_name, genome_config ->
-        def resolved_config = new LinkedHashMap(genome_config)
-        resolved_config.fasta = absoluteHostPath(resolved_config.fasta)
-        [(genome_name): resolved_config]
-}
-preflight_parameters.containers = preflight_parameters.containers.collectEntries {
-    container_name, container_path ->
-        [(container_name): resolvedContainer(container_path)]
-}
-preflight_parameters.container_bind_paths = (
-    preflight_parameters.container_bind_paths.collect {
-        absoluteHostPath(it)
+// The FASTA configured for --genome.
+def genomeFasta() {
+    def genome = params.genomes[params.genome]
+    if (!genome) {
+        error("Unknown --genome '${params.genome}'. Configured genomes: ${params.genomes.keySet().join(', ')}")
     }
-)
-def preflight_document = [
-    parameters: preflight_parameters,
-    paths: [
-        input: input_path,
-        fasta: selected_fasta,
-        genome_blacklist: genome_blacklist_path,
-        outdir: outdir_path,
-        ref_cache: ref_cache_path
+    return file(genome.fasta).toString()
+}
+
+// Settings for bin/cleavage, named like the parameters. --keep_multimappers
+// lets MAPQ-0 primary alignments count, together with `bwa-mem2 -a` (ALIGN)
+// and no fastp low-complexity filter (FASTP).
+def callerSettings() {
+    def multimappers = params.keep_multimappers
+    return [
+        analysis: params.analysis,
+        keep_multimappers: multimappers,
+        digenome_overhang: params.digenome_overhang,
+        digenome_pair_window: params.digenome_pair_window,
+        digenome_min_mapq: multimappers ? 0 : params.digenome_min_mapq,
+        digenome_forward_cutoff: params.digenome_forward_cutoff,
+        digenome_reverse_cutoff: params.digenome_reverse_cutoff,
+        digenome_depth_cutoff: params.digenome_depth_cutoff,
+        digenome_fraction_cutoff: params.digenome_fraction_cutoff,
+        digenome_pair_score_cutoff: params.digenome_pair_score_cutoff,
+        ndigenome_min_count: params.ndigenome_min_count,
+        ndigenome_min_fraction: params.ndigenome_min_fraction,
+        ndigenome_min_mapq: multimappers ? 0 : params.ndigenome_min_mapq,
+        ndigenome_opposite_window: params.ndigenome_opposite_window,
+        ndigenome_ambiguous_min_count: params.ndigenome_ambiguous_min_count,
+        ndigenome_ambiguous_min_fraction: params.ndigenome_ambiguous_min_fraction,
+        cleavage_artifact_window: params.cleavage_artifact_window,
+        cleavage_max_softclip_fraction: params.cleavage_max_softclip_fraction,
+        cleavage_max_indel_fraction: params.cleavage_max_indel_fraction,
+        cleavage_min_support_mean_mapq: multimappers ? 0 : params.cleavage_min_support_mean_mapq,
+        cleavage_control_min_depth: params.cleavage_control_min_depth,
+        cleavage_control_max_fraction: params.cleavage_control_max_fraction,
+        cleavage_control_min_fold: params.cleavage_control_min_fold,
+        cleavage_control_max_q: params.cleavage_control_max_q,
     ]
-]
-String preflight_json = JsonOutput.prettyPrint(
-    JsonOutput.toJson(preflight_document)
-)
+}
 
-def bundled_checksums = file("${baseDir}/containers/checksums.sha256").text
-    .readLines()
-    .findAll { it.trim() && !it.trim().startsWith('#') }
-    .collectEntries { line ->
-        def fields = line.trim().split(/\s+/, 2)
-        [(fields[1]): fields[0]]
-    }
-def source_manifest_lines = file("${baseDir}/containers/sources.tsv").text
-    .readLines()
-    .findAll { it.trim() }
-def source_manifest_header = source_manifest_lines.first().split('\t', -1)
-def container_sources = source_manifest_lines
-    .drop(1)
-    .collectEntries { line ->
-        def fields = line.split('\t', -1)
-        def provenance = [:]
-        source_manifest_header.drop(1).eachWithIndex { field_name, index ->
-            provenance[field_name] = fields[index + 1]
-        }
-        [(fields[0]): provenance]
-    }
+// Record what this run used before any task starts.
+def writeRunInfo(fasta, settings) {
+    def info_dir = file("${params.outdir}/pipeline_info")
+    info_dir.mkdirs()
+    def info = [
+        analysis: params.analysis,
+        genome: params.genome,
+        fasta: fasta,
+        ref_cache: file(params.ref_cache).toString(),
+        genome_blacklist: params.genome_blacklist ? file(params.genome_blacklist).toString() : null,
+        cleavage_chunks: params.cleavage_chunks,
+        caller_settings: settings,
+        nextflow_version: nextflow.version.toString(),
+        session_id: workflow.sessionId.toString(),
+    ]
+    file("${info_dir}/analysis_parameters.json").text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(info)) + '\n'
+    file("${projectDir}/containers/checksums.sha256").copyTo("${info_dir}/container_checksums.sha256")
+    file("${projectDir}/containers/sources.tsv").copyTo("${info_dir}/container_sources.tsv")
+}
 
-def run_info = [
-    schema_version: 10,
-    analysis: selected_analysis,
-    requested_genome: requested_genome,
-    resolved_genome: selected_genome,
-    fasta: selected_fasta,
-    ref_cache: ref_cache_path,
-    keep_multimappers: keep_multimappers,
-    genome_blacklist: genome_blacklist_path,
-    multimapper_counting: [
-        primary_alignments: 'counted_once_at_the_bwa_selected_primary_placement',
-        secondary_and_supplementary_alignments: 'diagnostic_only'
-    ],
-    automatic_overrides: keep_multimappers ? [
-        'digenome_min_mapq=0',
-        'ndigenome_min_mapq=0',
-        'cleavage_min_support_mean_mapq=0'
-    ] : [],
-    cleavage: [
-        chunks: cleavage_chunks,
-        cpus_per_chunk: 1,
-        interval_padding: cleavage_chunk_padding,
-        artifact_window: params.cleavage_artifact_window,
-        max_softclip_fraction: params.cleavage_max_softclip_fraction,
-        max_indel_fraction: params.cleavage_max_indel_fraction,
-        min_support_mean_mapq: effective_min_support_mean_mapq,
-        control_min_depth: params.cleavage_control_min_depth,
-        control_max_fraction: params.cleavage_control_max_fraction,
-        control_min_fold: params.cleavage_control_min_fold,
-        control_max_q: params.cleavage_control_max_q
-    ],
-    digenome: [
-        overhang: params.digenome_overhang,
-        pair_window: params.digenome_pair_window,
-        min_mapq: effective_digenome_min_mapq,
-        forward_cutoff: params.digenome_forward_cutoff,
-        reverse_cutoff: params.digenome_reverse_cutoff,
-        depth_cutoff: params.digenome_depth_cutoff,
-        fraction_cutoff: params.digenome_fraction_cutoff,
-        pair_score_cutoff: params.digenome_pair_score_cutoff
-    ],
-    ndigenome: [
-        min_count: params.ndigenome_min_count,
-        min_fraction: params.ndigenome_min_fraction,
-        min_mapq: effective_ndigenome_min_mapq,
-        opposite_window: params.ndigenome_opposite_window,
-        ambiguous_min_count: params.ndigenome_ambiguous_min_count,
-        ambiguous_min_fraction: params.ndigenome_ambiguous_min_fraction
-    ],
-    containers: params.containers,
-    bundled_container_checksums: bundled_checksums,
-    container_sources: container_sources
-]
-String run_info_json = JsonOutput.prettyPrint(JsonOutput.toJson(run_info))
+// Single-quote a user-supplied value for bash.
+def quote(value) {
+    return "'" + value.toString().replace("'", "'\\''") + "'"
+}
 
-process RUN_INFO {
-    publishDir "${params.outdir}/pipeline_info", mode: 'copy', overwrite: true
+process SAMPLESHEET {
 
     input:
-    val run_json
-    path preflight_ready
+    path samplesheet, stageAs: 'input.csv'
+    path code, stageAs: 'cleavage/*'
 
     output:
-    path "analysis_parameters.json"
+    path 'samples.json'
 
     script:
     """
-    cat > analysis_parameters.json <<'JSON'
-${run_json}
-JSON
+    python3 -m cleavage samplesheet input.csv samples.json --analysis ${params.analysis}
+    """
+
+    stub:
+    """
+    python3 -m cleavage samplesheet input.csv samples.json --analysis ${params.analysis}
     """
 }
 
-process PREFLIGHT {
-    tag "parameters"
-    cache false
-    publishDir "${params.outdir}/pipeline_info", mode: 'copy', overwrite: true
-
-    input:
-    val parameters_json
-    path validator
-    path schema
-
-    output:
-    path "preflight.ready.json", emit: ready
-
-    script:
-    """
-    cat > pipeline_parameters.json <<'JSON'
-${parameters_json}
-JSON
-
-    python3 ${shellQuote(validator)} \
-        --parameters pipeline_parameters.json \
-        --schema ${shellQuote(schema)} \
-        --ready preflight.ready.json
-    """
-}
-
-process VALIDATE_SAMPLESHEET {
-    tag "samplesheet"
-
-    input:
-    path samplesheet
-    path validator
-    val analysis
-    path preflight_ready
-
-    output:
-    path "samplesheet.valid.csv", emit: csv
-
-    script:
-    """
-    python3 ${shellQuote(validator)} ${shellQuote(samplesheet)} samplesheet.valid.csv ${shellQuote(analysis)}
-    """
-}
-
-process PREPARE_BWAMEM2_INDEX {
+process PREPARE_INDEX {
     tag "${genome}"
+    // Always re-check the shared cache; a cached task could point at a
+    // removed index.
     cache false
 
     input:
-    tuple val(genome), val(fasta), val(ref_cache)
-    path index_helper
-    path preflight_ready
+    val genome
+    val fasta
+    val ref_cache
+    path helper
 
     output:
-    tuple val(genome), val(fasta), path("bwamem2_index.ready"), emit: index
+    stdout
 
     script:
     """
-    bash ${shellQuote(index_helper)} \
-        --genome ${shellQuote(genome)} \
-        --fasta ${shellQuote(fasta)} \
-        --cache-dir ${shellQuote(ref_cache)} \
-        --ready bwamem2_index.ready \
-        --lock-timeout-seconds ${params.index_lock_timeout_seconds} \
-        --stale-lock-seconds ${params.index_stale_lock_seconds}
+    bash ${helper} --genome ${quote(genome)} --fasta ${quote(fasta)} --cache-dir ${quote(ref_cache)}
+    """
+
+    stub:
+    """
+    echo ${quote("${ref_cache}/stub/${genome}")}
     """
 }
 
-process CONCAT_PE_FASTQS {
+process FASTP {
     tag "${meta.sample}"
-    publishDir "${params.outdir}/concat_fastqs", mode: 'copy', enabled: params.publish_concat_fastqs
+    publishDir "${params.outdir}/fastp", mode: 'copy', pattern: '*.fastp.*'
+    publishDir "${params.outdir}/trimmed_fastqs", mode: 'copy', pattern: '*.trimmed.*', enabled: params.publish_trimmed_fastqs
 
     input:
-    tuple val(meta), path(r1s), path(r2s)
+    tuple val(meta), path(fastq_1, stageAs: 'in/r1_*.fastq.gz', arity: '1..*'), path(fastq_2, stageAs: 'in/r2_*.fastq.gz', arity: '0..*')
 
     output:
-    tuple val(meta),
-        path("${meta.sample}.R1.fastq.gz"),
-        path("${meta.sample}.R2.fastq.gz"), emit: reads
+    tuple val(meta), path("${meta.sample}.trimmed.R*.fastq.gz"), emit: reads
+    path "${meta.sample}.fastp.*", emit: qc
 
     script:
-    def r1_files = r1s.collect { shellQuote(it) }.join(' ')
-    def r2_files = r2s.collect { shellQuote(it) }.join(' ')
+    def r1 = fastq_1.size() == 1 ? fastq_1[0] : 'r1.fastq.gz'
+    def r2 = fastq_2.size() == 1 ? fastq_2[0] : 'r2.fastq.gz'
+    def paired = meta.single_end ? '' : "--in2 ${r2} --out2 ${meta.sample}.trimmed.R2.fastq.gz --detect_adapter_for_pe"
+    def low_complexity = params.analysis == 'digenome' && !params.keep_multimappers && params.fastp_low_complexity_filter
     """
-    cat ${r1_files} > ${shellQuote("${meta.sample}.R1.fastq.gz")}
-    cat ${r2_files} > ${shellQuote("${meta.sample}.R2.fastq.gz")}
-    """
-}
-
-process CONCAT_SE_FASTQS {
-    tag "${meta.sample}"
-    publishDir "${params.outdir}/concat_fastqs", mode: 'copy', enabled: params.publish_concat_fastqs
-
-    input:
-    tuple val(meta), path(r1s)
-
-    output:
-    tuple val(meta), path("${meta.sample}.fastq.gz"), emit: reads
-
-    script:
-    def r1_files = r1s.collect { shellQuote(it) }.join(' ')
-    """
-    cat ${r1_files} > ${shellQuote("${meta.sample}.fastq.gz")}
-    """
-}
-
-process FASTP_PE {
-    tag "${meta.sample}"
-    publishDir "${params.outdir}/fastp", mode: 'copy', pattern: "*.fastp.*", overwrite: true, failOnError: true
-    publishDir "${params.outdir}/trimmed_fastqs", mode: 'copy', pattern: "*.trimmed.*.fastq.gz", enabled: params.publish_trimmed_fastqs
-
-    input:
-    tuple val(meta), path(read1), path(read2)
-
-    output:
-    tuple val(meta),
-        path("${meta.sample}.trimmed.R1.fastq.gz"),
-        path("${meta.sample}.trimmed.R2.fastq.gz"), emit: reads
-    path "${meta.sample}.fastp.html", emit: html
-    path "${meta.sample}.fastp.json", emit: json
-
-    script:
-    def low_complexity = (
-        selected_analysis == 'digenome' &&
-        !keep_multimappers &&
-        params.fastp_low_complexity_filter
-    ) ? "--low_complexity_filter --complexity_threshold ${params.fastp_complexity_threshold}" : ""
-    """
-    fastp \
-        --in1 ${shellQuote(read1)} \
-        --in2 ${shellQuote(read2)} \
-        --out1 ${shellQuote("${meta.sample}.trimmed.R1.fastq.gz")} \
-        --out2 ${shellQuote("${meta.sample}.trimmed.R2.fastq.gz")} \
-        --html ${shellQuote("${meta.sample}.fastp.html")} \
-        --json ${shellQuote("${meta.sample}.fastp.json")} \
-        --thread ${task.cpus} \
-        --detect_adapter_for_pe \
-        --trim_poly_g \
-        --trim_poly_x \
-        --qualified_quality_phred ${params.fastp_qualified_quality_phred} \
-        --length_required ${params.fastp_length_required} \
-        ${low_complexity} \
+    ${fastq_1.size() > 1 ? "cat ${fastq_1.join(' ')} > r1.fastq.gz" : ''}
+    ${fastq_2.size() > 1 ? "cat ${fastq_2.join(' ')} > r2.fastq.gz" : ''}
+    fastp \\
+        --in1 ${r1} \\
+        --out1 ${meta.sample}.trimmed.R1.fastq.gz \\
+        ${paired} \\
+        --html ${meta.sample}.fastp.html \\
+        --json ${meta.sample}.fastp.json \\
+        --thread ${task.cpus} \\
+        --trim_poly_g \\
+        --trim_poly_x \\
+        --qualified_quality_phred ${params.fastp_qualified_quality_phred} \\
+        --length_required ${params.fastp_length_required} \\
+        ${low_complexity ? "--low_complexity_filter --complexity_threshold ${params.fastp_complexity_threshold}" : ''} \\
         ${params.fastp_extra_args}
     """
-}
 
-process FASTP_SE {
-    tag "${meta.sample}"
-    publishDir "${params.outdir}/fastp", mode: 'copy', pattern: "*.fastp.*", overwrite: true, failOnError: true
-    publishDir "${params.outdir}/trimmed_fastqs", mode: 'copy', pattern: "*.trimmed.fastq.gz", enabled: params.publish_trimmed_fastqs
-
-    input:
-    tuple val(meta), path(read1)
-
-    output:
-    tuple val(meta), path("${meta.sample}.trimmed.fastq.gz"), emit: reads
-    path "${meta.sample}.fastp.html", emit: html
-    path "${meta.sample}.fastp.json", emit: json
-
-    script:
-    def low_complexity = (
-        selected_analysis == 'digenome' &&
-        !keep_multimappers &&
-        params.fastp_low_complexity_filter
-    ) ? "--low_complexity_filter --complexity_threshold ${params.fastp_complexity_threshold}" : ""
+    stub:
     """
-    fastp \
-        --in1 ${shellQuote(read1)} \
-        --out1 ${shellQuote("${meta.sample}.trimmed.fastq.gz")} \
-        --html ${shellQuote("${meta.sample}.fastp.html")} \
-        --json ${shellQuote("${meta.sample}.fastp.json")} \
-        --thread ${task.cpus} \
-        --trim_poly_g \
-        --trim_poly_x \
-        --qualified_quality_phred ${params.fastp_qualified_quality_phred} \
-        --length_required ${params.fastp_length_required} \
-        ${low_complexity} \
-        ${params.fastp_extra_args}
+    touch ${meta.sample}.trimmed.R1.fastq.gz ${meta.sample}.fastp.html ${meta.sample}.fastp.json
+    ${meta.single_end ? '' : "touch ${meta.sample}.trimmed.R2.fastq.gz"}
     """
 }
 
-process ALIGN_MARKDUP_PE {
+process ALIGN {
     tag "${meta.sample}"
-    publishDir "${params.outdir}/bam", mode: 'copy', pattern: "*.bam*", overwrite: true, failOnError: true
-    publishDir "${params.outdir}/qc", mode: 'copy', pattern: "*.txt", overwrite: true, failOnError: true
+    publishDir "${params.outdir}/bam", mode: 'copy', pattern: '*.bam*'
+    publishDir "${params.outdir}/qc", mode: 'copy', pattern: '*.txt'
 
     input:
-    tuple val(meta),
-        path(read1),
-        path(read2),
-        val(index_prefix),
-        path(index_ready)
+    tuple val(meta), path(reads)
+    val index_prefix
 
     output:
-    tuple val(meta),
-        path("${meta.sample}.sorted.markdup.bam"),
-        path("${meta.sample}.sorted.markdup.bam.bai"), emit: bam
-    path "${meta.sample}.flagstat.txt", emit: flagstat
-    path "${meta.sample}.stats.txt", emit: stats
-    path "${meta.sample}.markdup.metrics.txt", emit: markdup_metrics
+    tuple val(meta), path("${meta.sample}.sorted.markdup.bam"), path("${meta.sample}.sorted.markdup.bam.bai"), emit: bam
+    tuple path("${meta.sample}.flagstat.txt"), path("${meta.sample}.stats.txt"), path("${meta.sample}.markdup.metrics.txt"), emit: qc
 
     script:
-    def multimapper_opt = keep_multimappers ? "-a" : ""
-    int total_cpus = task.cpus as int
-    if (total_cpus < 2) {
-        error "ALIGN_MARKDUP_PE requires at least 2 CPUs"
+    if (task.cpus < 2) {
+        error("ALIGN requires at least 2 CPUs")
     }
-    int piped_sort_threads = total_cpus >= 4 ? 2 : 0
-    int alignment_threads = Math.max(
-        1,
-        total_cpus - piped_sort_threads - 1
-    )
-    int samtools_threads = Math.max(0, total_cpus - 1)
+    // bwa-mem2 and the piped sort share the CPUs; later steps use all but one.
+    def sort_threads = task.cpus >= 4 ? 2 : 0
+    def bwa_threads = Math.max(1, task.cpus - sort_threads - 1)
+    def threads = task.cpus - 1
+    def all_alignments = params.keep_multimappers ? '-a' : ''
+    def read_group = "@RG\\\\tID:${meta.sample}\\\\tSM:${meta.sample}\\\\tPL:ILLUMINA\\\\tLB:${meta.sample}"
+    // Paired reads are name-sorted so fixmate can add the mate tags markdup needs.
+    def sort_for_markdup = meta.single_end
+        ? "samtools sort -@ ${sort_threads} -o positionsort.bam -"
+        : """samtools sort -@ ${sort_threads} -n -o namesort.bam -
+    samtools fixmate -@ ${threads} -m namesort.bam fixmate.bam
+    samtools sort -@ ${threads} -o positionsort.bam fixmate.bam"""
     """
-    test -s ${shellQuote(index_ready)}
-    RG='@RG\\tID:${meta.sample}\\tSM:${meta.sample}\\tPL:ILLUMINA\\tLB:${meta.sample}'
+    bwa-mem2 mem ${all_alignments} -t ${bwa_threads} -R '${read_group}' ${quote(index_prefix)} ${reads} \\
+        | ${sort_for_markdup}
+    samtools markdup -@ ${threads} -s positionsort.bam ${meta.sample}.sorted.markdup.bam \\
+        2> ${meta.sample}.markdup.metrics.txt
+    samtools index -@ ${threads} ${meta.sample}.sorted.markdup.bam
+    samtools flagstat -@ ${threads} ${meta.sample}.sorted.markdup.bam > ${meta.sample}.flagstat.txt
+    samtools stats -@ ${threads} ${meta.sample}.sorted.markdup.bam > ${meta.sample}.stats.txt
+    """
 
-    bwa-mem2 mem \
-        ${multimapper_opt} \
-        -t ${alignment_threads} \
-        -R "\${RG}" \
-        ${shellQuote(index_prefix)} \
-        ${shellQuote(read1)} \
-        ${shellQuote(read2)} \
-      | samtools sort -@ ${piped_sort_threads} -n \
-            -o ${shellQuote("${meta.sample}.namesort.bam")} -
-
-    samtools fixmate -@ ${samtools_threads} -m \
-        ${shellQuote("${meta.sample}.namesort.bam")} \
-        ${shellQuote("${meta.sample}.fixmate.bam")}
-    samtools sort -@ ${samtools_threads} \
-        -o ${shellQuote("${meta.sample}.positionsort.bam")} \
-        ${shellQuote("${meta.sample}.fixmate.bam")}
-    samtools markdup -@ ${samtools_threads} -s \
-        ${shellQuote("${meta.sample}.positionsort.bam")} \
-        ${shellQuote("${meta.sample}.sorted.markdup.bam")} \
-        2> ${shellQuote("${meta.sample}.markdup.metrics.txt")}
-    samtools index -@ ${samtools_threads} \
-        ${shellQuote("${meta.sample}.sorted.markdup.bam")}
-    samtools flagstat -@ ${samtools_threads} \
-        ${shellQuote("${meta.sample}.sorted.markdup.bam")} \
-        > ${shellQuote("${meta.sample}.flagstat.txt")}
-    samtools stats -@ ${samtools_threads} \
-        ${shellQuote("${meta.sample}.sorted.markdup.bam")} \
-        > ${shellQuote("${meta.sample}.stats.txt")}
+    stub:
+    """
+    touch ${meta.sample}.sorted.markdup.bam ${meta.sample}.sorted.markdup.bam.bai
+    touch ${meta.sample}.flagstat.txt ${meta.sample}.stats.txt ${meta.sample}.markdup.metrics.txt
     """
 }
 
-process ALIGN_MARKDUP_SE {
+process CALL_CHUNK {
+    tag "${meta.sample}:${chunk}"
+
+    input:
+    tuple val(meta), path(bam), path(bai), path(control_bam), path(control_bai), path(vcf), path(vcf_index), val(chunk)
+    path blacklist
+    path code, stageAs: 'cleavage/*'
+    val settings
+
+    output:
+    tuple val(meta), path("chunk_*.json"), path("chunk_*.jsonl.gz")
+
+    script:
+    def prefix = "chunk_${chunk.toString().padLeft(3, '0')}"
+    def control = control_bam ? "--control-bam ${control_bam} --control-sample ${meta.control}" : ''
+    """
+    cat > settings.json <<'JSON'
+    ${settings}
+    JSON
+    python3 -m cleavage call \\
+        --settings settings.json \\
+        --bam ${bam} \\
+        --sample ${meta.sample} \\
+        --chunk ${chunk} \\
+        --chunks ${params.cleavage_chunks} \\
+        --out-prefix ${prefix} \\
+        ${control} \\
+        ${vcf ? "--vcf ${vcf}" : ''} \\
+        ${blacklist ? "--blacklist ${blacklist}" : ''}
+    """
+
+    stub:
+    def prefix = "chunk_${chunk.toString().padLeft(3, '0')}"
+    """
+    touch ${prefix}.json ${prefix}.jsonl.gz
+    """
+}
+
+process FINALIZE {
     tag "${meta.sample}"
-    publishDir "${params.outdir}/bam", mode: 'copy', pattern: "*.bam*", overwrite: true, failOnError: true
-    publishDir "${params.outdir}/qc", mode: 'copy', pattern: "*.txt", overwrite: true, failOnError: true
+    publishDir "${params.outdir}/${params.analysis}", mode: 'copy', pattern: "*.${params.analysis}*"
+    publishDir "${params.outdir}/pipeline_info/cleavage_chunks", mode: 'copy', pattern: '*.cleavage_chunks.tsv'
 
     input:
-    tuple val(meta), path(read1), val(index_prefix), path(index_ready)
+    tuple val(meta), path(summaries), path(records)
+    path code, stageAs: 'cleavage/*'
+    val settings
 
     output:
-    tuple val(meta),
-        path("${meta.sample}.sorted.markdup.bam"),
-        path("${meta.sample}.sorted.markdup.bam.bai"), emit: bam
-    path "${meta.sample}.flagstat.txt", emit: flagstat
-    path "${meta.sample}.stats.txt", emit: stats
-    path "${meta.sample}.markdup.metrics.txt", emit: markdup_metrics
+    path "${meta.sample}.${params.analysis}.*"
+    path "${meta.sample}.cleavage_chunks.tsv"
+    path "${meta.sample}.${params.analysis}_mqc.tsv", emit: multiqc
 
     script:
-    def multimapper_opt = keep_multimappers ? "-a" : ""
-    int total_cpus = task.cpus as int
-    if (total_cpus < 2) {
-        error "ALIGN_MARKDUP_SE requires at least 2 CPUs"
-    }
-    int piped_sort_threads = total_cpus >= 4 ? 2 : 0
-    int alignment_threads = Math.max(
-        1,
-        total_cpus - piped_sort_threads - 1
-    )
-    int samtools_threads = Math.max(0, total_cpus - 1)
     """
-    test -s ${shellQuote(index_ready)}
-    RG='@RG\\tID:${meta.sample}\\tSM:${meta.sample}\\tPL:ILLUMINA\\tLB:${meta.sample}'
-
-    bwa-mem2 mem \
-        ${multimapper_opt} \
-        -t ${alignment_threads} \
-        -R "\${RG}" \
-        ${shellQuote(index_prefix)} \
-        ${shellQuote(read1)} \
-      | samtools sort -@ ${piped_sort_threads} \
-            -o ${shellQuote("${meta.sample}.positionsort.bam")} -
-
-    samtools markdup -@ ${samtools_threads} -s \
-        ${shellQuote("${meta.sample}.positionsort.bam")} \
-        ${shellQuote("${meta.sample}.sorted.markdup.bam")} \
-        2> ${shellQuote("${meta.sample}.markdup.metrics.txt")}
-    samtools index -@ ${samtools_threads} \
-        ${shellQuote("${meta.sample}.sorted.markdup.bam")}
-    samtools flagstat -@ ${samtools_threads} \
-        ${shellQuote("${meta.sample}.sorted.markdup.bam")} \
-        > ${shellQuote("${meta.sample}.flagstat.txt")}
-    samtools stats -@ ${samtools_threads} \
-        ${shellQuote("${meta.sample}.sorted.markdup.bam")} \
-        > ${shellQuote("${meta.sample}.stats.txt")}
+    cat > settings.json <<'JSON'
+    ${settings}
+    JSON
+    python3 -m cleavage finalize \\
+        --settings settings.json \\
+        --sample ${meta.sample} \\
+        ${meta.control ? "--control-sample ${meta.control}" : ''} \\
+        --out-prefix ${meta.sample} \\
+        ${summaries}
     """
-}
 
-process PLAN_CLEAVAGE_CHUNKS {
-    tag "${meta.sample}"
-    publishDir "${params.outdir}/pipeline_info/cleavage_chunks",
-        mode: 'copy',
-        overwrite: true,
-        failOnError: true,
-        pattern: "*.cleavage_chunks.tsv"
-
-    input:
-    tuple val(meta), path(bam), path(bai)
-    path planner
-    path blacklist_helper
-    path genome_blacklist
-    val blacklist_enabled
-    val chunk_count
-    val chunk_padding
-
-    output:
-    tuple val(meta), path("chunk_*.intervals.tsv"), emit: chunks
-    path "${meta.sample}.cleavage_chunks.tsv", emit: plan
-
-    script:
-    def blacklist_args = blacklist_enabled ?
-        "--genome-blacklist ${shellQuote(genome_blacklist)}" : ''
+    stub:
+    def stem = "${meta.sample}.${params.analysis}"
     """
-    python3 ${shellQuote(planner)} \
-        --bam ${shellQuote(bam)} \
-        --chunks ${chunk_count} \
-        --padding ${chunk_padding} \
-        ${blacklist_args} \
-        --output-dir . \
-        --plan ${shellQuote("${meta.sample}.cleavage_chunks.tsv")}
-    """
-}
-
-process CLEAVAGE_CALL_CHUNK {
-    tag "${meta.sample}:${selected_analysis}:${chunk_id}"
-
-    input:
-    tuple val(meta),
-        path(bam), path(bai), path(control_bam), path(control_bai),
-        path(variant_vcf), path(variant_index),
-        val(chunk_id), path(intervals_file)
-    path caller
-    path blacklist_helper
-    path genome_blacklist
-    val blacklist_enabled
-
-    output:
-    tuple val(meta),
-        path("${meta.sample}.${chunk_id}.${selected_analysis}.raw.jsonl.gz"),
-        path("${meta.sample}.${chunk_id}.${selected_analysis}.chunk.json"), emit: chunks
-
-    script:
-    def raw_output = "${meta.sample}.${chunk_id}.${selected_analysis}.raw.jsonl.gz"
-    def summary_output = "${meta.sample}.${chunk_id}.${selected_analysis}.chunk.json"
-    def control_args = meta.has_control ? [
-        "--control-bam ${shellQuote(control_bam)}",
-        "--control-sample ${shellQuote(meta.control_sample)}"
-    ].join(' ') : ''
-    def variant_args = meta.has_variant ?
-        "--variant-vcf ${shellQuote(variant_vcf)}"
-        : ''
-    def multimapper_args = keep_multimappers ? '--keep-multimappers' : ''
-    def blacklist_args = blacklist_enabled ?
-        "--genome-blacklist ${shellQuote(genome_blacklist)}" : ''
-    """
-    python3 ${shellQuote(caller)} \
-        --analysis ${shellQuote(selected_analysis)} \
-        --bam ${shellQuote(bam)} \
-        --sample ${shellQuote(meta.sample)} \
-        --output-prefix ${shellQuote(meta.sample)} \
-        ${control_args} \
-        ${variant_args} \
-        ${multimapper_args} \
-        ${blacklist_args} \
-        --intervals-file ${shellQuote(intervals_file)} \
-        --chunk-id ${shellQuote(chunk_id)} \
-        --raw-output ${shellQuote(raw_output)} \
-        --summary-output ${shellQuote(summary_output)} \
-        --ndigenome-min-count ${params.ndigenome_min_count} \
-        --ndigenome-min-fraction ${params.ndigenome_min_fraction} \
-        --ndigenome-min-mapq ${effective_ndigenome_min_mapq} \
-        --ndigenome-opposite-window ${params.ndigenome_opposite_window} \
-        --ndigenome-ambiguous-min-count ${params.ndigenome_ambiguous_min_count} \
-        --ndigenome-ambiguous-min-fraction ${params.ndigenome_ambiguous_min_fraction} \
-        --digenome-overhang ${params.digenome_overhang} \
-        --digenome-pair-window ${params.digenome_pair_window} \
-        --digenome-min-mapq ${effective_digenome_min_mapq} \
-        --digenome-forward-cutoff ${params.digenome_forward_cutoff} \
-        --digenome-reverse-cutoff ${params.digenome_reverse_cutoff} \
-        --digenome-depth-cutoff ${params.digenome_depth_cutoff} \
-        --digenome-fraction-cutoff ${params.digenome_fraction_cutoff} \
-        --digenome-pair-score-cutoff ${params.digenome_pair_score_cutoff} \
-        --artifact-window ${params.cleavage_artifact_window} \
-        --max-softclip-fraction ${params.cleavage_max_softclip_fraction} \
-        --max-indel-fraction ${params.cleavage_max_indel_fraction} \
-        --min-support-mean-mapq ${effective_min_support_mean_mapq} \
-        --control-min-depth ${params.cleavage_control_min_depth} \
-        --control-max-fraction ${params.cleavage_control_max_fraction} \
-        --control-min-fold ${params.cleavage_control_min_fold} \
-        --control-max-q ${params.cleavage_control_max_q}
-    """
-}
-
-process FINALIZE_CLEAVAGE_CALL {
-    tag "${meta.sample}:${selected_analysis}"
-    publishDir "${params.outdir}/${selected_analysis}",
-        mode: 'copy',
-        overwrite: true,
-        failOnError: true
-
-    input:
-    tuple val(meta), path(raw_fragments), path(chunk_summaries)
-    path finalizer
-    path caller
-    path blacklist_helper
-
-    output:
-    tuple val(meta),
-        path("${meta.sample}.${selected_analysis}.all.tsv"), emit: all
-    path "${meta.sample}.${selected_analysis}.high_confidence.tsv", emit: high_confidence
-    path "${meta.sample}.${selected_analysis}.manual_review.tsv", emit: manual_review
-    path "${meta.sample}.${selected_analysis}.artifact.tsv", emit: artifact
-    path "${meta.sample}.${selected_analysis}.bed", emit: bed
-    path "${meta.sample}.${selected_analysis}.qc.json", emit: qc
-    path "${meta.sample}.${selected_analysis}_mqc.tsv", emit: multiqc
-
-    script:
-    def raw_args = raw_fragments.collect {
-        "--raw-fragment ${shellQuote(it)}"
-    }.join(' ')
-    def summary_args = chunk_summaries.collect {
-        "--chunk-summary ${shellQuote(it)}"
-    }.join(' ')
-    """
-    python3 ${shellQuote(finalizer)} \
-        --analysis ${shellQuote(selected_analysis)} \
-        --sample ${shellQuote(meta.sample)} \
-        --output-prefix ${shellQuote(meta.sample)} \
-        ${raw_args} \
-        ${summary_args}
+    touch ${stem}.all.tsv ${stem}.high_confidence.tsv ${stem}.manual_review.tsv ${stem}.artifact.tsv
+    touch ${stem}.bed ${stem}.qc.json ${stem}_mqc.tsv ${meta.sample}.cleavage_chunks.tsv
     """
 }
 
 process MULTIQC {
-    tag "multiqc"
-    publishDir "${params.outdir}/multiqc", mode: 'copy', overwrite: true, failOnError: true
+    publishDir "${params.outdir}/multiqc", mode: 'copy'
 
     input:
-    path qc_files
+    path reports
 
     output:
-    path "multiqc_report.html", emit: report
-    path "multiqc_data", emit: data
+    path 'multiqc_report.html'
+    path 'multiqc_data'
 
     script:
     """
-    multiqc . --filename multiqc_report.html
-
-    if [[ -d multiqc_report_data && ! -d multiqc_data ]]; then
-        mv multiqc_report_data multiqc_data
-    fi
-    [[ -d multiqc_data ]] || {
-        echo "ERROR: MultiQC data directory was not created" >&2
-        exit 1
-    }
+    multiqc .
     """
-}
 
-workflow {
-    preflight_validator_ch = Channel.value(
-        file("${baseDir}/bin/validate_pipeline_params.py")
-    )
-    parameter_schema_ch = Channel.value(
-        file("${baseDir}/nextflow_schema.json")
-    )
-    validator_ch = Channel.value(file("${baseDir}/bin/validate_samplesheet.py"))
-    index_helper_ch = Channel.value(file("${baseDir}/bin/prepare_bwamem2_index.sh"))
-    chunk_planner_ch = Channel.value(file("${baseDir}/bin/plan_cleavage_chunks.py"))
-    blacklist_helper_ch = Channel.value(
-        file("${baseDir}/bin/genome_blacklist.py")
-    )
-    cleavage_caller_ch = Channel.value(file("${baseDir}/bin/call_cleavage.py"))
-    cleavage_finalizer_ch = Channel.value(
-        file("${baseDir}/bin/finalize_cleavage_chunks.py")
-    )
-    samplesheet_ch = Channel.value(file(input_path))
-
-    PREFLIGHT(
-        Channel.value(preflight_json),
-        preflight_validator_ch,
-        parameter_schema_ch
-    )
-    preflight_ready_ch = PREFLIGHT.out.ready.first()
-    RUN_INFO(Channel.value(run_info_json), preflight_ready_ch)
-    VALIDATE_SAMPLESHEET(
-        samplesheet_ch,
-        validator_ch,
-        Channel.value(selected_analysis),
-        preflight_ready_ch
-    )
-
-    rows_ch = VALIDATE_SAMPLESHEET.out.csv.splitCsv(header: true)
-    read_layout_ch = rows_ch.branch {
-        pe: it.fastq_2?.trim()
-        se: !it.fastq_2?.trim()
-    }
-
-    pe_grouped_ch = read_layout_ch.pe
-        .map { row ->
-            def meta = [
-                sample: row.sample as String,
-                is_control: row.is_control == 'true',
-                control_sample: row.control as String,
-                variant_vcf: row.variant_vcf as String,
-                variant_index: row.variant_index as String
-            ]
-            tuple(
-                meta,
-                file(row.fastq_1 as String),
-                file(row.fastq_2 as String)
-            )
-        }
-        .groupTuple()
-        .map { meta, r1s, r2s ->
-            tuple(meta, r1s, r2s)
-        }
-
-    se_grouped_ch = read_layout_ch.se
-        .map { row ->
-            def meta = [
-                sample: row.sample as String,
-                is_control: row.is_control == 'true',
-                control_sample: row.control as String,
-                variant_vcf: row.variant_vcf as String,
-                variant_index: row.variant_index as String
-            ]
-            tuple(meta, file(row.fastq_1 as String))
-        }
-        .groupTuple()
-        .map { meta, r1s ->
-            tuple(meta, r1s)
-        }
-
-    genome_ch = Channel.value(
-        tuple(selected_genome, selected_fasta, ref_cache_path)
-    )
-    PREPARE_BWAMEM2_INDEX(
-        genome_ch,
-        index_helper_ch,
-        preflight_ready_ch
-    )
-
-    resolved_index_ch = PREPARE_BWAMEM2_INDEX.out.index.map {
-        genome, fasta, ready ->
-            def values = ready.text.readLines()
-                .findAll { it.contains('\t') }
-                .collectEntries { line ->
-                    def fields = line.split('\t', 2)
-                    [(fields[0]): fields[1]]
-                }
-            tuple(values.index_prefix as String, ready)
-    }
-
-    CONCAT_PE_FASTQS(pe_grouped_ch)
-    CONCAT_SE_FASTQS(se_grouped_ch)
-    FASTP_PE(CONCAT_PE_FASTQS.out.reads)
-    FASTP_SE(CONCAT_SE_FASTQS.out.reads)
-
-    pe_align_ch = FASTP_PE.out.reads
-        .combine(resolved_index_ch)
-        .map {
-            meta, read1, read2, index_prefix, index_ready ->
-                tuple(
-                    meta,
-                    read1,
-                    read2,
-                    index_prefix,
-                    index_ready
-                )
-        }
-
-    se_align_ch = FASTP_SE.out.reads
-        .combine(resolved_index_ch)
-        .map {
-            meta, read1, index_prefix, index_ready ->
-                tuple(meta, read1, index_prefix, index_ready)
-        }
-
-    ALIGN_MARKDUP_PE(pe_align_ch)
-    ALIGN_MARKDUP_SE(se_align_ch)
-
-    qc_ch = FASTP_PE.out.html
-        .mix(FASTP_PE.out.json)
-        .mix(FASTP_SE.out.html)
-        .mix(FASTP_SE.out.json)
-        .mix(ALIGN_MARKDUP_PE.out.flagstat)
-        .mix(ALIGN_MARKDUP_PE.out.stats)
-        .mix(ALIGN_MARKDUP_PE.out.markdup_metrics)
-        .mix(ALIGN_MARKDUP_SE.out.flagstat)
-        .mix(ALIGN_MARKDUP_SE.out.stats)
-        .mix(ALIGN_MARKDUP_SE.out.markdup_metrics)
-
-    no_control_bam = file("${baseDir}/assets/NO_CONTROL.bam")
-    no_control_bai = file("${baseDir}/assets/NO_CONTROL.bam.bai")
-    no_variant_vcf = file("${baseDir}/assets/NO_VARIANT.vcf.gz")
-    no_variant_index = file("${baseDir}/assets/NO_VARIANT.vcf.gz.tbi")
-    no_genome_blacklist = file("${baseDir}/assets/NO_BLACKLIST.bed")
-    genome_blacklist_ch = Channel.value(
-        has_genome_blacklist ?
-            file(genome_blacklist_path) : no_genome_blacklist
-    )
-
-    aligned_bam_ch = ALIGN_MARKDUP_PE.out.bam.mix(ALIGN_MARKDUP_SE.out.bam)
-    bam_type_ch = aligned_bam_ch.branch {
-        control: it[0].is_control
-        treated: !it[0].is_control
-    }
-    control_bam_ch = bam_type_ch.control
-        .map { meta, bam, bai ->
-            tuple(meta.sample, bam, bai)
-        }
-
-    treated_control_ch = bam_type_ch.treated.branch {
-        matched: it[0].control_sample
-        uncontrolled: !it[0].control_sample
-    }
-
-    matched_requests_ch = treated_control_ch.matched
-        .map { meta, bam, bai ->
-            tuple(meta.control_sample, meta, bam, bai)
-        }
-        .combine(control_bam_ch, by: 0)
-        .map {
-            control_sample, meta, bam, bai, control_bam, control_bai ->
-                def request_meta = meta + [
-                    has_control: true,
-                    has_variant: meta.variant_vcf != ''
-                ]
-                tuple(
-                    request_meta, bam, bai,
-                    control_bam, control_bai,
-                    meta.variant_vcf ?
-                        file(meta.variant_vcf as String) : no_variant_vcf,
-                    meta.variant_index ?
-                        file(meta.variant_index as String) : no_variant_index
-                )
-        }
-
-    uncontrolled_requests_ch = treated_control_ch.uncontrolled
-        .map { meta, bam, bai ->
-                def request_meta = meta + [
-                    has_control: false,
-                    has_variant: meta.variant_vcf != ''
-                ]
-                tuple(
-                    request_meta, bam, bai,
-                    no_control_bam, no_control_bai,
-                    meta.variant_vcf ?
-                        file(meta.variant_vcf as String) : no_variant_vcf,
-                    meta.variant_index ?
-                        file(meta.variant_index as String) : no_variant_index
-                )
-        }
-
-    cleavage_requests_ch = matched_requests_ch.mix(uncontrolled_requests_ch)
-    chunk_plan_requests_ch = cleavage_requests_ch.map {
-        meta, bam, bai, control_bam, control_bai,
-        variant_vcf, variant_index ->
-            tuple(meta, bam, bai)
-    }
-    PLAN_CLEAVAGE_CHUNKS(
-        chunk_plan_requests_ch,
-        chunk_planner_ch,
-        blacklist_helper_ch,
-        genome_blacklist_ch,
-        Channel.value(has_genome_blacklist),
-        Channel.value(cleavage_chunks),
-        Channel.value(cleavage_chunk_padding)
-    )
-
-    chunk_requests_ch = cleavage_requests_ch
-        .join(PLAN_CLEAVAGE_CHUNKS.out.chunks, by: 0)
-        .flatMap {
-            meta, bam, bai, control_bam, control_bai,
-            variant_vcf, variant_index,
-            chunk_files ->
-                def files = chunk_files instanceof List ?
-                    chunk_files : [chunk_files]
-                files.sort { it.name }.collect { intervals_file ->
-                    def chunk_id = intervals_file.name.replace(
-                        '.intervals.tsv',
-                        ''
-                    )
-                    tuple(
-                        meta, bam, bai,
-                        control_bam, control_bai,
-                        variant_vcf, variant_index,
-                        chunk_id, intervals_file
-                    )
-                }
-        }
-
-    CLEAVAGE_CALL_CHUNK(
-        chunk_requests_ch,
-        cleavage_caller_ch,
-        blacklist_helper_ch,
-        genome_blacklist_ch,
-        Channel.value(has_genome_blacklist)
-    )
-    finalize_requests_ch = CLEAVAGE_CALL_CHUNK.out.chunks.groupTuple()
-    FINALIZE_CLEAVAGE_CALL(
-        finalize_requests_ch,
-        cleavage_finalizer_ch,
-        cleavage_caller_ch,
-        blacklist_helper_ch
-    )
-    qc_ch = qc_ch.mix(FINALIZE_CLEAVAGE_CALL.out.multiqc)
-
-    MULTIQC(qc_ch.collect())
+    stub:
+    """
+    touch multiqc_report.html
+    mkdir multiqc_data
+    """
 }
