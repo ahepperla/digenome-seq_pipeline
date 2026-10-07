@@ -39,7 +39,8 @@ def finalize(
     control_sample: str,
     out_prefix: str,
 ) -> dict:
-    summaries = load_summaries(summary_paths, settings, sample)
+    chunks = load_summaries(summary_paths, settings, sample)
+    summaries = [summary for _path, summary in chunks]
     first = summaries[0]
     contig_lengths = {name: length for name, length in first["contigs"]}
     contig_order = {name: index for index, name in enumerate(contig_lengths)}
@@ -48,7 +49,7 @@ def finalize(
     write_plan(plan, f"{out_prefix}.cleavage_chunks.tsv")
 
     merged = heapq.merge(
-        *(read_chunk(summary, path, plan[summary["chunk"]]) for summary, path in zip(summaries, summary_paths)),
+        *(read_chunk(summary, path, plan[summary["chunk"]]) for path, summary in chunks),
         key=lambda record: record_key(record, contig_order),
     )
     with tempfile.TemporaryFile("w+") as staged:
@@ -73,10 +74,15 @@ def finalize(
         return write_outputs(filtered_rows(staged, q_values, settings), out_prefix, settings, report)
 
 
-def load_summaries(paths: list[str], settings: CallerSettings, sample: str) -> list[dict]:
-    """Read the chunk summaries, ordered by chunk index, and check they belong
-    together: one per index, same sample, settings, contigs, plan, and blacklist."""
-    summaries = sorted((json.loads(Path(path).read_text()) for path in paths), key=lambda item: item["chunk"])
+def load_summaries(paths: list[str], settings: CallerSettings, sample: str) -> list[tuple[str, dict]]:
+    """Read the chunk summaries as (path, summary) pairs ordered by chunk index,
+    and check they belong together: one per index, same sample, settings,
+    contigs, plan, and blacklist. Paths may arrive in any order."""
+    chunks = sorted(
+        ((path, json.loads(Path(path).read_text())) for path in paths),
+        key=lambda item: item[1]["chunk"],
+    )
+    summaries = [summary for _path, summary in chunks]
     count = len(summaries)
     if [summary["chunk"] for summary in summaries] != list(range(count)):
         raise ValueError(f"Expected chunks 0..{count - 1}, found {[s['chunk'] for s in summaries]}")
@@ -91,7 +97,7 @@ def load_summaries(paths: list[str], settings: CallerSettings, sample: str) -> l
         for field in ("contigs", "plan", "genome_blacklist"):
             if summary[field] != first[field]:
                 raise ValueError(f"Chunks disagree about {field}")
-    return summaries
+    return chunks
 
 
 def read_chunk(summary: dict, summary_path: str, owned: list[OwnedInterval]) -> Iterator[dict]:

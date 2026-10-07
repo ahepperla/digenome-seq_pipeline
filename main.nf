@@ -246,7 +246,8 @@ process ALIGN {
     def bwa_threads = Math.max(1, task.cpus - sort_threads - 1)
     def threads = task.cpus - 1
     def all_alignments = params.keep_multimappers ? '-a' : ''
-    def read_group = "@RG\\\\tID:${meta.sample}\\\\tSM:${meta.sample}\\\\tPL:ILLUMINA\\\\tLB:${meta.sample}"
+    // bwa-mem2 turns each \\t into a tab.
+    def read_group = "@RG\\tID:${meta.sample}\\tSM:${meta.sample}\\tPL:ILLUMINA\\tLB:${meta.sample}"
     // Paired reads are name-sorted so fixmate can add the mate tags markdup needs.
     def sort_for_markdup = meta.single_end
         ? "samtools sort -@ ${sort_threads} -o positionsort.bam -"

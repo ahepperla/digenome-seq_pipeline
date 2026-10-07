@@ -319,6 +319,42 @@ class FinalizeTests(unittest.TestCase):
         ]
         self.assertEqual(len(keys), len(set(keys)))
 
+    def test_chunk_files_may_arrive_in_any_order(self) -> None:
+        """Nextflow collects chunks in completion order; the finalizer must
+        pair each summary with its own records regardless."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "golden"))
+        from scenarios import multi_contig
+
+        scenario = multi_contig()
+        inputs = scenario.write_inputs(self.tmp / "inputs")
+        for analysis in ("digenome", "ndigenome"):
+            settings = make_settings(analysis, base=scenario.settings)
+            summaries = []
+            for index in range(3):
+                prefix = self.tmp / f"{analysis}_chunk_{index}"
+                call_chunk(
+                    settings,
+                    bam_path=str(inputs["bam"]),
+                    sample="Sample",
+                    index=index,
+                    count=3,
+                    out_prefix=str(prefix),
+                    control_path=str(inputs["control_bam"]),
+                    control_sample="Control",
+                    vcf_path=str(inputs["vcf"]),
+                    blacklist_path=str(inputs["blacklist"]),
+                )
+                summaries.append(f"{prefix}.json")
+            in_order = str(self.tmp / f"{analysis}_in_order")
+            reversed_order = str(self.tmp / f"{analysis}_reversed")
+            finalize(settings, summaries, "Sample", "Control", in_order)
+            finalize(settings, list(reversed(summaries)), "Sample", "Control", reversed_order)
+            for suffix in ("all.tsv", "bed", "qc.json"):
+                self.assertEqual(
+                    Path(f"{in_order}.{analysis}.{suffix}").read_bytes(),
+                    Path(f"{reversed_order}.{analysis}.{suffix}").read_bytes(),
+                )
+
     def test_finalizer_missing_chunks(self) -> None:
         """Only chunk 1 of 2 supplied → error message contains expected text."""
         treated_reads = self.endpoint_site_reads(0, 500, 8, "chr1")

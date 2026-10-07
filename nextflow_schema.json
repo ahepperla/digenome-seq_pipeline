@@ -7,7 +7,10 @@
     "inputs": {
       "title": "Inputs and outputs",
       "type": "object",
-      "required": ["input", "genome"],
+      "required": [
+        "input",
+        "genome"
+      ],
       "properties": {
         "input": {
           "type": "string",
@@ -22,7 +25,10 @@
         },
         "analysis": {
           "type": "string",
-          "enum": ["digenome", "ndigenome"],
+          "enum": [
+            "digenome",
+            "ndigenome"
+          ],
           "default": "digenome",
           "description": "digenome pairs forward and reverse endpoints into DSBs; ndigenome calls isolated strand endpoints (SSBs, nicks)."
         },
@@ -43,11 +49,6 @@
           "format": "directory-path",
           "default": "${projectDir}/reference_cache",
           "description": "Shared bwa-mem2 index cache, keyed by genome, FASTA SHA-256, and bwa-mem2 version."
-        },
-        "genomes": {
-          "type": "object",
-          "hidden": true,
-          "description": "Configured genomes: a map from name to [fasta: path]. Set in a config file."
         },
         "publish_trimmed_fastqs": {
           "type": "boolean",
@@ -266,11 +267,23 @@
     }
   },
   "allOf": [
-    { "$ref": "#/$defs/inputs" },
-    { "$ref": "#/$defs/execution" },
-    { "$ref": "#/$defs/fastp" },
-    { "$ref": "#/$defs/digenome" },
-    { "$ref": "#/$defs/ndigenome" },
-    { "$ref": "#/$defs/filters" }
+    {
+      "$ref": "#/$defs/inputs"
+    },
+    {
+      "$ref": "#/$defs/execution"
+    },
+    {
+      "$ref": "#/$defs/fastp"
+    },
+    {
+      "$ref": "#/$defs/digenome"
+    },
+    {
+      "$ref": "#/$defs/ndigenome"
+    },
+    {
+      "$ref": "#/$defs/filters"
+    }
   ]
 }
