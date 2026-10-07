@@ -4,7 +4,9 @@
 Both run their chunk steps one after another with the default settings, so
 the timings are comparable step by step. Prints wall time, CPU time, and peak
 memory for each step, then checks that every output value of the new caller
-matches the old one after mapping old columns to the new layout.
+matches the old one after mapping old columns to the new layout. For
+Digenome it also reports how often the pair-score cutoff agrees with the
+standalone RGEN cutoff of 2.5.
 
 See tests/benchmark/README.md for how to run it on Longleaf.
 """
@@ -18,6 +20,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import fields
 from pathlib import Path
 
@@ -42,6 +45,15 @@ RENAMED = {
 }
 # ru_maxrss is in KiB on Linux and in bytes on macOS.
 RSS_UNITS_PER_MB = 1024 * 1024 if sys.platform == "darwin" else 1024
+# The standalone RGEN tool's score cutoff (digenome -s 2.5), and the
+# pair-score cutoffs tried against it: 0.50, 0.55, ..., 3.00.
+RGEN_SCORE_CUTOFF = 2.5
+CUTOFF_GRID = [step / 20 for step in range(10, 61)]
+# Caller thresholds other than the pair score.
+OTHER_CALLER_REASONS = {
+    "LOW_FORWARD_COUNT", "LOW_REVERSE_COUNT", "LOW_FORWARD_DEPTH",
+    "LOW_REVERSE_DEPTH", "LOW_FORWARD_FRACTION", "LOW_REVERSE_FRACTION",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,7 +103,9 @@ def default_settings(analysis: str, keep_multimappers: bool) -> dict:
 
 def run_legacy(args, directory: Path, timings: list[dict]) -> str:
     legacy = Path(args.legacy_bin).resolve()
-    optional = []
+    # The old caller defaulted to RGEN's 2.5; compare at the pipeline's default.
+    cutoff = default_settings(args.analysis, args.keep_multimappers)["digenome_pair_score_cutoff"]
+    optional = ["--digenome-pair-score-cutoff", str(cutoff)]
     if args.control_bam:
         optional += ["--control-bam", args.control_bam, "--control-sample", "Control"]
     if args.vcf:
@@ -189,6 +203,38 @@ def compare(args, legacy_prefix: str, new_prefix: str) -> list[str]:
     return differences
 
 
+def score_agreement(prefix: str, cutoff: float) -> str:
+    """How often pair score > `cutoff` agrees with RGEN score > 2.5, over the
+    pairs that pass every other caller threshold (docs/decisions.md,
+    "The Digenome pair-score cutoff defaults to 1.1")."""
+    with open(f"{prefix}.digenome.all.tsv", newline="") as handle:
+        pairs = [
+            (float(row["digenome_pair_score"]), float(row["rgen_digenome_score"]) > RGEN_SCORE_CUTOFF)
+            for row in csv.DictReader(handle, delimiter="\t")
+            if not OTHER_CALLER_REASONS & set(row["filter_reasons"].split(";"))
+        ]
+    if not pairs:
+        return "No pairs pass the count, depth, and fraction cutoffs; no score agreement to report."
+
+    def agreeing(threshold: float) -> int:
+        return sum((pair > threshold) == rgen_passes for pair, rgen_passes in pairs)
+
+    table = Counter((pair > cutoff, rgen_passes) for pair, rgen_passes in pairs)
+    current = agreeing(cutoff)
+    agreement = {threshold: agreeing(threshold) for threshold in CUTOFF_GRID}
+    best = max(agreement.values())
+    best_cutoffs = [threshold for threshold, count in agreement.items() if count == best]
+    return "\n".join([
+        f"Pair score versus RGEN score, {len(pairs)} pairs passing the count, depth, and fraction cutoffs:",
+        f"{'':<16}{f'RGEN > {RGEN_SCORE_CUTOFF}':>12}{f'RGEN <= {RGEN_SCORE_CUTOFF}':>13}",
+        f"{f'pair > {cutoff}':<16}{table[True, True]:>12}{table[True, False]:>13}",
+        f"{f'pair <= {cutoff}':<16}{table[False, True]:>12}{table[False, False]:>13}",
+        f"agreement at {cutoff}: {current} of {len(pairs)} ({current / len(pairs):.1%})",
+        f"best agreement over cutoffs {CUTOFF_GRID[0]} to {CUTOFF_GRID[-1]}: {best} of {len(pairs)} "
+        f"({best / len(pairs):.1%}), at {best_cutoffs[0]} to {best_cutoffs[-1]}",
+    ])
+
+
 def main() -> None:
     args = parse_args()
     out = Path(args.out).resolve()
@@ -210,6 +256,9 @@ def main() -> None:
             f"max {max(row['peak_rss_mb'] for row in steps)} MB"
         )
     (out / "timings.json").write_text(json.dumps(timings, indent=2) + "\n")
+    if args.analysis == "digenome":
+        cutoff = default_settings(args.analysis, args.keep_multimappers)["digenome_pair_score_cutoff"]
+        print(score_agreement(new_prefix, cutoff))
     print("outputs match" if not differences else f"OUTPUTS DIFFER: {', '.join(differences)}")
     sys.exit(1 if differences else 0)
 
