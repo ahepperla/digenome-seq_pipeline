@@ -8,8 +8,7 @@
       "title": "Inputs and outputs",
       "type": "object",
       "required": [
-        "input",
-        "genome"
+        "input"
       ],
       "properties": {
         "input": {
@@ -17,11 +16,11 @@
           "format": "file-path",
           "exists": true,
           "pattern": "^\\S+\\.csv$",
-          "description": "Samplesheet CSV with columns sample, fastq_1, fastq_2, and optional control and variant_vcf."
+          "description": "Samplesheet CSV: sample, fastq_1, fastq_2, and optional control and variant_vcf; with --long_reads, sample, bam, and optional control and variant_vcf."
         },
         "genome": {
           "type": "string",
-          "description": "Key of params.genomes to align against (for example GRCh38)."
+          "description": "Key of params.genomes to align against (for example GRCh38). Required unless --long_reads."
         },
         "analysis": {
           "type": "string",
@@ -65,6 +64,11 @@
           "type": "boolean",
           "default": false,
           "description": "Run bwa-mem2 with -a, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement."
+        },
+        "long_reads": {
+          "type": "boolean",
+          "default": false,
+          "description": "Call long-read (ONT/PacBio) samples from aligned BAMs given in the samplesheet's bam column, skipping trimming and alignment. Both aligned ends of each read count, and the soft-clip and indel limits become 1.0."
         },
         "cleavage_chunks": {
           "type": "integer",
@@ -158,8 +162,8 @@
         "digenome_pair_score_cutoff": {
           "type": "number",
           "minimum": 0,
-          "default": 2.5,
-          "description": "digenome_pair_score must be > this. Not comparable with RGEN score cutoffs."
+          "default": 1.1,
+          "description": "digenome_pair_score must be > this. 1.1 is RGEN's 2.5 moved to this score's scale; the two scores' cutoffs are not interchangeable."
         }
       }
     },

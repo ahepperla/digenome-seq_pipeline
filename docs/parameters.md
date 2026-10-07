@@ -26,8 +26,8 @@ and invalid values, and checks that required parameters are supplied.
 
 | Parameter | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `--input` | Path | `null` | Yes | Input samplesheet CSV with columns sample, fastq_1, fastq_2, and optional control and variant_vcf. See README.md for validation rules. |
-| `--genome` | String | `null` | Yes | Key of params.genomes to align against (for example GRCh38). |
+| `--input` | Path | `null` | Yes | Samplesheet CSV: `sample`, `fastq_1`, `fastq_2`, and optional `control` and `variant_vcf`; with `--long_reads`, `sample`, `bam`, and optional `control` and `variant_vcf`. See README.md for the rules. |
+| `--genome` | String | `null` | Yes, except with `--long_reads` | Key of params.genomes to align against (for example GRCh38). Long-read BAMs are already aligned, so it isn't needed then. |
 | `--analysis` | Choice | `digenome` | No | Calling mode: `digenome` pairs forward and reverse endpoints into DSBs; `ndigenome` calls isolated strand endpoints (SSBs, nicks). One mode applies to the complete run. |
 | `--outdir` | Path | `results` | No | Published results directory. Use a separate one for each run. |
 | `--genome_blacklist` | Path | `null` | No | Optional BED or BED.gz of regions to skip, with BAM contig names and 0-based half-open coordinates. |
@@ -44,6 +44,7 @@ defaults are `GRCh38`, `GRCh37`, and `GRCm39`.
 | --- | --- | --- | --- |
 | `--keep_multimappers` | Boolean | `false` | Run bwa-mem2 with `-a`, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement. |
 | `--cleavage_chunks` | Integer | `8` | Coordinate chunks per sample, each called by a one-CPU task. Changes runtime, never results. |
+| `--long_reads` | Boolean | `false` | Call long-read (ONT/PacBio) samples from aligned BAMs given in the samplesheet's `bam` column; trimming and alignment are skipped. Both aligned ends of each read count (see [cleavage_algorithm.md](cleavage_algorithm.md#long-reads)), and `--cleavage_max_softclip_fraction` and `--cleavage_max_indel_fraction` become 1.0 because nanopore reads routinely carry small indels and clipped ends. |
 
 ## Read trimming (fastp)
 
@@ -83,7 +84,7 @@ digenome_pair_score = forward_fraction * reverse_fraction
 | `--digenome_reverse_cutoff` | Integer | `5` | Reverse count `>` value | Reverse endpoint count must be > this. |
 | `--digenome_depth_cutoff` | Integer | `10` | Each strand depth `>` value | Each strand's depth must be > this. |
 | `--digenome_fraction_cutoff` | Number | `0.2` | Each endpoint fraction `>` value | Each strand's endpoint fraction must be > this. |
-| `--digenome_pair_score_cutoff` | Number | `2.5` | Pair score `>` value | digenome_pair_score must be > this. Not comparable with RGEN score cutoffs. |
+| `--digenome_pair_score_cutoff` | Number | `1.1` | Pair score `>` value | digenome_pair_score must be > this. 1.1 is the standalone RGEN cutoff of 2.5 moved to this score's scale (see below); the two scores' cutoffs are not interchangeable. |
 
 Candidate pairs are selected with deterministic one-to-one matching. Pairs
 that fail caller thresholds remain in the complete audit TSV with their

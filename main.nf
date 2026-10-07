@@ -81,12 +81,15 @@ def genomeFasta() {
 
 // Settings for bin/cleavage, named like the parameters. --keep_multimappers
 // lets MAPQ-0 primary alignments count, together with `bwa-mem2 -a` (ALIGN)
-// and no fastp low-complexity filter (FASTP).
+// and no fastp low-complexity filter (FASTP). --long_reads loosens the clip
+// and indel limits, because nanopore reads routinely carry both.
 def callerSettings() {
     def multimappers = params.keep_multimappers
+    def long_reads = params.long_reads
     return [
         analysis: params.analysis,
         keep_multimappers: multimappers,
+        long_reads: long_reads,
         digenome_overhang: params.digenome_overhang,
         digenome_pair_window: params.digenome_pair_window,
         digenome_min_mapq: multimappers ? 0 : params.digenome_min_mapq,
@@ -102,8 +105,8 @@ def callerSettings() {
         ndigenome_ambiguous_min_count: params.ndigenome_ambiguous_min_count,
         ndigenome_ambiguous_min_fraction: params.ndigenome_ambiguous_min_fraction,
         cleavage_artifact_window: params.cleavage_artifact_window,
-        cleavage_max_softclip_fraction: params.cleavage_max_softclip_fraction,
-        cleavage_max_indel_fraction: params.cleavage_max_indel_fraction,
+        cleavage_max_softclip_fraction: long_reads ? 1.0 : params.cleavage_max_softclip_fraction,
+        cleavage_max_indel_fraction: long_reads ? 1.0 : params.cleavage_max_indel_fraction,
         cleavage_min_support_mean_mapq: multimappers ? 0 : params.cleavage_min_support_mean_mapq,
         cleavage_control_min_depth: params.cleavage_control_min_depth,
         cleavage_control_max_fraction: params.cleavage_control_max_fraction,

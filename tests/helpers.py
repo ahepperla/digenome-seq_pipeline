@@ -19,6 +19,7 @@ from cleavage.settings import CallerSettings, settings_from_dict  # noqa: E402
 # Permissive settings used by the chunking tests.
 CHUNK_SETTINGS = {
     "keep_multimappers": True,
+    "long_reads": False,
     "ndigenome_min_count": 5,
     "ndigenome_min_fraction": 0.20,
     "ndigenome_min_mapq": 0,

@@ -6,6 +6,7 @@
   "settings": {
     "analysis": "digenome",
     "keep_multimappers": true,
+    "long_reads": false,
     "digenome_overhang": 0,
     "digenome_pair_window": 2,
     "digenome_min_mapq": 0,

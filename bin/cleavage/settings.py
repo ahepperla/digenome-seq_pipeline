@@ -2,8 +2,9 @@
 
 Every name matches a pipeline parameter. main.nf has already applied the
 --keep_multimappers overrides (both minimum MAPQs and the support mean-MAPQ
-filter become 0), and nf-schema has already checked types and ranges, so this
-module only checks that the object has exactly the expected keys.
+filter become 0) and the --long_reads overrides (the soft-clip and indel
+limits become 1.0), and nf-schema has already checked types and ranges, so
+this module only checks that the object has exactly the expected keys.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ ANALYSES = ("digenome", "ndigenome")
 class CallerSettings:
     analysis: str
     keep_multimappers: bool
+    long_reads: bool
 
     digenome_overhang: int
     digenome_pair_window: int
