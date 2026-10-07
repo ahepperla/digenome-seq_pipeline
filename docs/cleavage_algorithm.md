@@ -1,13 +1,15 @@
 # Cleavage calling
 
-`bin/cleavage/` calls strand-aware 5′ endpoint pileups in two modes:
+`bin/cleavage/` calls strand-aware read-end pileups in two modes:
 
 - `digenome`: forward and reverse endpoints paired into double-strand breaks (DSBs);
 - `ndigenome`: isolated strand endpoints, i.e. single-strand breaks or nicks (SSBs).
 
 Both modes share the read filters, local artifact metrics, matched controls,
-known-indel annotation, and output tiers described here. Every threshold is a
-pipeline parameter; see [parameters.md](parameters.md).
+known-indel annotation, and output tiers described here. Short reads
+contribute their 5′ ends; long reads (`--long_reads`) contribute both ends
+(see [Long reads](#long-reads)). Every threshold is a pipeline parameter; see
+[parameters.md](parameters.md).
 
 ## Reads that count
 
@@ -25,11 +27,11 @@ primary placement can split support among equivalent copies.
 
 ## Coordinates
 
-The endpoint is the 0-based aligned 5′ reference base: `reference_start` for
-forward reads and `reference_end - 1` for reverse reads. Soft and hard clips
-never extend it. Insertions do not advance the reference coordinate; deletions
-do. Tables report both 0-based and 1-based columns; the BED is 0-based
-half-open.
+The endpoint of a short read is the 0-based aligned 5′ reference base:
+`reference_start` for forward reads and `reference_end - 1` for reverse reads.
+Soft and hard clips never extend it. Insertions do not advance the reference
+coordinate; deletions do. Tables report both 0-based and 1-based columns; the
+BED is 0-based half-open.
 
 ## Chunks
 
@@ -130,7 +132,8 @@ Caller thresholds are strict `>`: forward and reverse counts, each strand's
 depth, each strand's fraction, and the pair score. A cutoff of 5 therefore
 needs at least 6 reads. Pairs that fail one are reported with reasons such as
 `LOW_FORWARD_COUNT` and `LOW_DIGENOME_PAIR_SCORE`. The `combined_*` columns
-pool both strands; they feed the control test and the BED score.
+pool both strands (for long reads, each read once); they feed the control test
+and the BED score.
 
 ### RGEN comparison score
 
@@ -153,11 +156,56 @@ It follows the executable's read filter, which keeps supplementary alignments
 but excludes unmapped, secondary, QC-failed, duplicate, and low-MAPQ ones.
 Blacklisted and off-contig positions contribute nothing.
 
+## Long reads
+
+With `--long_reads`, each sample is one aligned, coordinate-sorted, indexed
+BAM (ONT or PacBio), called as given: no trimming, alignment, or `--genome`.
+A long read spans a whole molecule, so both of its aligned ends are molecule
+ends, and both count. The read filters and thresholds are the same, apart
+from the artifact limits below.
+
+| Data | Endpoints of one read |
+| --- | --- |
+| short reads | the 5′ end: `reference_start` (+) or `reference_end - 1` (−) |
+| long reads, Digenome | `reference_start` as `+` and `reference_end - 1` as `−`, whatever the read's orientation |
+| long reads, nDigenome | both ends, each on the read's own strand |
+
+Clips never extend an end, and an alignment whose two ends fall on one base
+contributes one endpoint. Depth at an endpoint counts the reads covering it
+that can end there on that strand: every covering read for long-read
+Digenome, and reads on that strand otherwise.
+
+**Digenome.** A cut between `p - 1` and `p` leaves molecules whose left end is
+`p` and molecules whose right end is `p - 1`, sequenced in either orientation.
+Their ends become `+` endpoints at `p` and `−` endpoints at `p - 1`, which pair
+exactly as short-read endpoints do. The pair score uses each side's own count
+and depth. For the combined columns, the control fraction, the fold, and the
+Fisher test, the combined depth counts each read covering either endpoint
+once; summing the two sides' depths would count every spanning read twice.
+
+**nDigenome.** A read's strand is the DNA strand of its molecule. In a library
+that keeps strands, a nick gives two same-strand stacks one base apart, so two
+SSB rows; a double-strand cut adds ends on the other strand within the window,
+and those rows become POSSIBLE_DSB. A standard double-stranded ligation
+library leaves no read ends at nicks. Long reads need not be paired.
+
+**Artifact limits.** `--long_reads` sets `cleavage_max_softclip_fraction` and
+`cleavage_max_indel_fraction` to 1.0, because nanopore reads routinely carry
+small indels and clipped ends. The metrics are still reported, and
+`HIGH_5P_SOFTCLIP` still applies when every supporting read is clipped at
+that end, for example by adapter remnants; check `softclip_fraction` before
+trusting the artifact tier.
+
+**RGEN score.** `rgen_digenome_score` counts both ends of long reads too, and
+it keeps supplementary alignments as the standalone tool does, so the split
+points of chimeric reads enter it. It remains comparison only.
+
 ## Local artifact metrics
 
 Around each endpoint (`cleavage_artifact_window` bases each side) the caller
-measures supporting and local MAPQ and NM, the 5′ soft-clipped fraction of
-supporting reads, the fraction of local alignments with a CIGAR insertion or
+measures supporting and local MAPQ and NM, the fraction of supporting reads
+soft- or hard-clipped at the end that forms the endpoint (the 5′ end for short
+reads), the fraction of local alignments with a CIGAR insertion or
 deletion touching the window (and the most common such indel), secondary
 endpoint support, and indel records from the optional VCF. For a Digenome
 pair, the two strands' metrics are pooled; the reported indel comes from the
@@ -251,12 +299,17 @@ fraction, and Digenome rows have strand `.`.
 
 ## Cutoff provenance
 
-1. **Digenome reference settings.** The count, depth, fraction, and score
-   defaults come from `digenome -G 0 -q 1 -f 5 -r 5 -d 10 -R 0.2 -s 2.5` in the
+1. **Digenome reference settings.** The count, depth, and fraction defaults
+   come from `digenome -G 0 -q 1 -f 5 -r 5 -d 10 -R 0.2 -s 2.5` in the
    [original Digenome distribution](http://www.rgenome.net/static/digenome-js/digenome).
-   The pipeline applies 2.5 to `digenome_pair_score`, which is not the
-   standalone tool's score; `rgen_digenome_score` was cross-checked against the
-   standalone v1.0 executable and is for comparison only.
+   Its `-s 2.5` applies to the standalone tool's own score, which
+   `rgen_digenome_score` reproduces (cross-checked against the v1.0
+   executable). `digenome_pair_score` uses other math (strand fractions, no
+   −1 terms, no five-position sum, divided by 4), so its default of 1.1 is
+   2.5 moved to its scale: in a model of cut sites with 3–45 background reads
+   per strand, balanced and 2:1 pairs, RGEN's 2.5 falls at a pair score of
+   1.0–1.4, typically 1.1. The benchmark in `tests/benchmark/` reports how
+   often the two cutoffs agree on real pairs.
 2. **Published nDigenome focal thresholds.** At least 10 reads sharing a 5′
    endpoint and at least 20% local fraction come from Kim et al., *Unbiased
    investigation of specificities of prime editing systems in human cells*,

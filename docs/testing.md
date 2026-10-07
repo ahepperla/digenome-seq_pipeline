@@ -22,16 +22,25 @@ production data. It runs `bash -n` on the shell scripts and every unittest:
   Fisher and Benjamini–Hochberg, filters and tiers, the blacklist, the chunk
   plan, and every finalizer check. Threshold tests sit exactly on each
   boundary, so a `>` turned into `>=` fails.
-- **Samplesheet** checks, one test per rule.
+- **Long reads** (`test_long_reads.py`): both aligned ends count, as `+`/`−`
+  by side in Digenome and on the read's strand in nDigenome; a one-base
+  alignment is one endpoint; Digenome depth is every covering read, and the
+  combined depth counts each read once in treated and control; a pair split
+  across chunks; the clip at the endpoint's own end; a nick gives two SSB
+  rows and a cut gives POSSIBLE_DSB rows.
+- **Samplesheet** checks, one test per rule, for both input formats.
 - **Index cache** (`test_index_cache.py`) with a fake `bwa-mem2`: reuse,
   content addressing, version isolation, quarantine, stale-lock recovery,
   permissions under a restrictive umask.
 - **Workflow** (`test_workflow.py`): parameter names and defaults agree across
   `nextflow.config`, `nextflow_schema.json`, and `parameters.md`; container
   provenance; the smoke fixture. With `nextflow` installed it also runs
-  `nextflow lint` and stub runs of both modes (`-stub-run`, no tools needed),
-  checking every published file, one chunk task per chunk per called sample,
-  that controls are not called, and the `--keep_multimappers` settings.
+  `nextflow lint` and stub runs of both modes and of `--long_reads`
+  (`-stub-run`, no tools needed), checking every published file, the
+  processes that ran, one chunk task per chunk per called sample, that
+  controls are not called, and the `--keep_multimappers` and `--long_reads`
+  settings. The long-read run has no `--genome`, and its treated and control
+  BAMs share a file name.
 
 The workflow tests use `$NEXTFLOW` if set, else `nextflow` on PATH. Run them
 on Longleaf's version with `NEXTFLOW=nextflow-25.04.7 ./tests/run_tests.sh`.
@@ -58,6 +67,15 @@ forward reads start there and 11 reverse reads end there) and an SSB at 300
 (11 forward reads start there). Expect a Digenome pair at 250 and, in
 nDigenome mode, a passing SSB at 300 plus POSSIBLE_DSB rows at 250. The
 fixture checks orchestration and integration, not biological sensitivity.
+
+To smoke-test `--long_reads`, give the BAMs from the Digenome smoke run as
+long-read input. The fixture's reads aren't long reads, so only check that
+the run finishes and publishes the cleavage tables:
+
+```bash
+printf 'sample,bam\nTiny,%s\n' "$PWD/smoke_digenome/bam/Tiny.sorted.markdup.bam" > smoke_long_reads.csv
+nextflow run . -profile apptainer,test --long_reads --input smoke_long_reads.csv --outdir smoke_long_reads -work-dir smoke_work_long_reads
+```
 
 ## What only Longleaf can show
 

@@ -1,17 +1,19 @@
 # Digenome-seq and nDigenome-seq pipeline
 
-Nextflow pipeline that calls nuclease cleavage sites from Illumina
-whole-genome sequencing of digested genomic DNA.
+Nextflow pipeline that calls nuclease cleavage sites from whole-genome
+sequencing of digested genomic DNA: Illumina reads, or aligned ONT or PacBio
+long reads with `--long_reads`.
 
 | `--analysis` | Calls | Reads |
 | --- | --- | --- |
-| `digenome` (default) | forward and reverse 5′ endpoints paired into double-strand breaks | paired-end or single-end |
-| `ndigenome` | isolated strand endpoints: single-strand breaks or nicks | paired-end |
+| `digenome` (default) | forward and reverse endpoints paired into double-strand breaks | paired-end, single-end, or long reads |
+| `ndigenome` | isolated strand endpoints: single-strand breaks or nicks | paired-end or long reads |
 
 Steps: samplesheet check → bwa-mem2 index (shared cache) → fastp → bwa-mem2
 alignment and duplicate marking → cleavage calling in parallel coordinate
 chunks → per-sample finalize (pairing, sample-wide statistics, filters) →
-MultiQC. How calls are made is in
+MultiQC. Long reads arrive aligned and start at cleavage calling. How calls
+are made is in
 [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md); every parameter is in
 [docs/parameters.md](docs/parameters.md).
 
@@ -73,6 +75,37 @@ Untreated,/data/Untreated_R1.fastq.gz,/data/Untreated_R2.fastq.gz,,
 
 A template is in `assets/samplesheet_template.csv`.
 
+## Long reads
+
+`--long_reads` calls ONT or PacBio reads from BAMs you have already aligned,
+for example with minimap2. Trimming, alignment, and the reference cache are
+skipped, and `--genome` isn't needed.
+
+```bash
+nextflow run /path/to/digenome-seq_pipeline \
+  -profile longleaf \
+  --long_reads \
+  --input long_reads.csv \
+  --analysis digenome \
+  --outdir results_long_reads \
+  -work-dir /work/groups/my_lab/long_reads
+```
+
+```csv
+sample,bam,control,variant_vcf
+Treated,/data/Treated.sorted.bam,Untreated,
+Untreated,/data/Untreated.sorted.bam,,
+```
+
+- Each sample is one row and one coordinate-sorted BAM, indexed as
+  `<bam>.bai` or `<bam>.csi`; merge a sample's runs first.
+- `control` and `variant_vcf` work as they do for short reads.
+- Reads flagged as duplicates are not counted, as with short reads; marking
+  them is up to you.
+- Both aligned ends of each primary read count, and the soft-clip and indel
+  limits become 1.0. [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md#long-reads)
+  shows what cuts and nicks look like in long reads.
+
 ## Profiles and configuration
 
 | Profile | Use |
@@ -102,6 +135,7 @@ then run with `-c custom.config --genome MyGenome`.
 
 | Option | Default | Effect |
 | --- | --- | --- |
+| `--long_reads` | off | Call aligned long-read BAMs (see [Long reads](#long-reads)) |
 | `--keep_multimappers` | off | Count MAPQ-0 primary alignments for repetitive regions (see below) |
 | `--cleavage_chunks` | 8 | Chunks per sample, each a one-CPU task; changes runtime, never results |
 | `--genome_blacklist` | none | BED/BED.gz of regions to skip (see below) |
@@ -112,6 +146,8 @@ primary alignments count (both minimum MAPQs and the support mean-MAPQ filter
 become 0), and turns off fastp's low-complexity filter. Each read still counts
 once, at BWA's primary placement; secondary and supplementary alignments stay
 diagnostic. Support can therefore be split across equivalent repeat copies.
+With `--long_reads` only the MAPQ changes apply, since the BAMs come
+aligned.
 
 **Blacklist.** `--genome_blacklist` takes 0-based half-open BED rows with the
 BAM's contig names; overlapping and adjacent rows are merged. Malformed rows,
@@ -141,7 +177,8 @@ lengths; a mismatch such as `chr1` versus `1` stops the run.
 │   ├── <sample>.<analysis>.manual_review.tsv    filtered for other reasons
 │   ├── <sample>.<analysis>.qc.json
 │   └── <sample>.<analysis>_mqc.tsv
-├── bam/  fastp/  qc/  multiqc/
+├── bam/  fastp/  qc/                            short reads only
+├── multiqc/
 ├── trimmed_fastqs/                              only with --publish_trimmed_fastqs
 └── pipeline_info/
     ├── analysis_parameters.json                 resolved settings, written at launch
