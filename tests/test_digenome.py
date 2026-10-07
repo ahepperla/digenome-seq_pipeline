@@ -293,10 +293,7 @@ class DigenomeTests(unittest.TestCase):
             rows[0]["control_rgen_digenome_score"],
         )
         self.assertEqual(rows[0]["tier"], "artifact")
-        reasons = rows[0]["filter_reasons"]
-        self.assertIn("HIGH_CONTROL_FRACTION", reasons)
-        self.assertIn("LOW_CONTROL_FOLD", reasons)
-        self.assertIn("CONTROL_Q_FAIL", reasons)
+        self.assertEqual(rows[0]["filter_reasons"], "HIGH_CONTROL_FRACTION;LOW_CONTROL_FOLD;CONTROL_Q_FAIL")
 
     def test_indel_and_vcf_artifacts_are_shared(self) -> None:
         """Both endpoints share indel and known-indel artifact reasons."""
@@ -323,18 +320,16 @@ class DigenomeTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["tier"], "artifact")
-        reasons = rows[0]["filter_reasons"]
-        # Split by ; to check each reason is present exactly once
-        reason_list = reasons.split(";")
-        self.assertIn("NEARBY_INDEL", reason_list)
-        self.assertIn("KNOWN_INDEL", reason_list)
+        self.assertEqual(rows[0]["filter_reasons"], "NEARBY_INDEL;KNOWN_INDEL")
 
     def test_known_indel_overlap_union(self) -> None:
         """Known indel within artifact window of both endpoints appears exactly once."""
+        # Forward endpoint 800 and reverse endpoint 798: both artifact windows
+        # (10 bp) include the VCF indel at 0-based 804.
         reads = [make_read(f"fwd_{i}", 800) for i in range(8)]
-        reads += [make_read(f"rev_{i}", 751, reverse=True) for i in range(8)]
+        reads += [reverse_read_ending_at(f"rev_{i}", 798) for i in range(8)]
         reads += forward_background("fbg", 800, 12)
-        reads += reverse_background("rbg", 751, 12)
+        reads += reverse_background("rbg", 798, 12)
         bam = write_bam(self.tmp / "treated.bam", [("chr1", 2000)], reads)
 
         # VCF indel at position 805 (within artifact window of both 800 and 751)
@@ -354,11 +349,8 @@ class DigenomeTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         # known_indel_overlap should contain the single overlap (chr1:804 or similar)
-        known_indel = rows[0]["known_indel_overlap"]
-        if known_indel:
-            # Should be a single entry, no duplicates
-            parts = known_indel.split(";")
-            self.assertEqual(len(parts), 1)
+        self.assertEqual(rows[0]["reverse_position_0based"], "798")
+        self.assertEqual(rows[0]["known_indel_overlap"], "chr1:805:AA>A")
 
     def test_strict_cutoff_low_forward_count(self) -> None:
         """Forward count exactly equal to cutoff → LOW_FORWARD_COUNT filter."""
@@ -366,10 +358,10 @@ class DigenomeTests(unittest.TestCase):
         reverse = SiteMetrics(endpoint_count=8, endpoint_fraction=0.5, strand_depth=16)
         score = pair_score(forward, reverse)
 
-        settings = make_settings("digenome", digenome_forward_cutoff=4)
+        settings = make_settings("digenome", digenome_forward_cutoff=4, digenome_pair_score_cutoff=0.0)
         reasons = caller_filter_reasons(forward, reverse, score, settings)
 
-        self.assertIn("LOW_FORWARD_COUNT", reasons)
+        self.assertEqual(reasons, ["LOW_FORWARD_COUNT"])
 
     def test_strict_cutoff_forward_count_just_above(self) -> None:
         """Forward count one above cutoff → no LOW_FORWARD_COUNT."""
@@ -377,10 +369,10 @@ class DigenomeTests(unittest.TestCase):
         reverse = SiteMetrics(endpoint_count=8, endpoint_fraction=0.5, strand_depth=16)
         score = pair_score(forward, reverse)
 
-        settings = make_settings("digenome", digenome_forward_cutoff=4)
+        settings = make_settings("digenome", digenome_forward_cutoff=4, digenome_pair_score_cutoff=0.0)
         reasons = caller_filter_reasons(forward, reverse, score, settings)
 
-        self.assertNotIn("LOW_FORWARD_COUNT", reasons)
+        self.assertEqual(reasons, [])
 
     def test_strict_cutoff_low_forward_depth(self) -> None:
         """Strand depth exactly equal to cutoff → LOW_FORWARD_DEPTH."""
@@ -388,10 +380,10 @@ class DigenomeTests(unittest.TestCase):
         reverse = SiteMetrics(endpoint_count=8, endpoint_fraction=0.5, strand_depth=16)
         score = pair_score(forward, reverse)
 
-        settings = make_settings("digenome", digenome_depth_cutoff=4)
+        settings = make_settings("digenome", digenome_depth_cutoff=4, digenome_pair_score_cutoff=0.0)
         reasons = caller_filter_reasons(forward, reverse, score, settings)
 
-        self.assertIn("LOW_FORWARD_DEPTH", reasons)
+        self.assertEqual(reasons, ["LOW_FORWARD_DEPTH"])
 
     def test_duplicate_endpoint_records_error(self) -> None:
         """Duplicate endpoint records on same contig raise ValueError."""

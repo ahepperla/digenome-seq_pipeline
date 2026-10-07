@@ -71,8 +71,9 @@ class OutputFilterTests(unittest.TestCase):
             "signal_classification": "SSB",
         }
         apply_filters(row, settings)
-        self.assertIn("HIGH_5P_SOFTCLIP", row["filter_reasons"])
+        self.assertEqual(row["filter_reasons"], "HIGH_5P_SOFTCLIP")
         self.assertEqual(row["filter_status"], "FILTERED")
+        self.assertEqual(row["tier"], "artifact")
 
     def test_indel_fraction_boundary(self) -> None:
         """indel_fraction == 0.20 → NEARBY_INDEL."""
@@ -86,7 +87,7 @@ class OutputFilterTests(unittest.TestCase):
             "signal_classification": "SSB",
         }
         apply_filters(row, settings)
-        self.assertIn("NEARBY_INDEL", row["filter_reasons"])
+        self.assertEqual(row["filter_reasons"], "NEARBY_INDEL")
         self.assertEqual(row["filter_status"], "FILTERED")
 
     def test_support_mean_mapq_boundary(self) -> None:
@@ -136,7 +137,7 @@ class OutputFilterTests(unittest.TestCase):
             "control_fisher_q": 0.01,
         }
         apply_filters(row, settings)
-        self.assertIn("HIGH_CONTROL_FRACTION", row["filter_reasons"])
+        self.assertEqual(row["filter_reasons"], "HIGH_CONTROL_FRACTION")
 
     def test_digenome_caller_filter_reasons_come_first(self) -> None:
         """Digenome: caller_filter_reasons come first, then artifact reasons."""
@@ -150,10 +151,8 @@ class OutputFilterTests(unittest.TestCase):
             "caller_filter_reasons": ["LOW_DIGENOME_PAIR_SCORE"],
         }
         apply_filters(row, settings)
-        self.assertIn("LOW_DIGENOME_PAIR_SCORE", row["filter_reasons"])
-        self.assertIn("HIGH_5P_SOFTCLIP", row["filter_reasons"])
-        reasons = row["filter_reasons"].split(";")
-        self.assertEqual(reasons[0], "LOW_DIGENOME_PAIR_SCORE")
+        self.assertEqual(row["filter_reasons"], "LOW_DIGENOME_PAIR_SCORE;HIGH_5P_SOFTCLIP")
+        self.assertEqual(row["tier"], "artifact")
 
     def test_ndigenome_non_ssb_appends_signal_class(self) -> None:
         """nDigenome non-SSB rows get their signal class appended as a reason."""
@@ -167,7 +166,7 @@ class OutputFilterTests(unittest.TestCase):
             "signal_classification": "POSSIBLE_DSB",
         }
         apply_filters(row, settings)
-        self.assertIn("POSSIBLE_DSB", row["filter_reasons"])
+        self.assertEqual(row["filter_reasons"], "POSSIBLE_DSB")
         self.assertEqual(row["tier"], "manual_review")
 
     def test_ndigenome_ssb_no_signal_class_appended(self) -> None:

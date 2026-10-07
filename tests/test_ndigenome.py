@@ -32,7 +32,9 @@ from helpers import (  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from cleavage.finalize import MULTIMAPPER_WARNING  # noqa: E402
+from cleavage.bam import measure_site  # noqa: E402
 from cleavage.ndigenome import strongest_opposite  # noqa: E402
+from cleavage.output import format_value  # noqa: E402
 from cleavage.stats import fisher_exact_two_sided, benjamini_hochberg  # noqa: E402
 
 
@@ -80,7 +82,7 @@ class NDigenomeTests(unittest.TestCase):
         settings = make_settings("ndigenome")
         prefix, qc = run_caller(settings, {"bam": bam, "control_bam": None, "vcf": None, "blacklist": None}, self.tmp, chunks=1, sample="dsb")
         rows = self.read_rows("dsb")
-        self.assertTrue(rows)
+        self.assertEqual([(row["position_0based"], row["strand"]) for row in rows], [("100", "+"), ("101", "-")])
         for row in rows:
             self.assertEqual(row["signal_classification"], "POSSIBLE_DSB")
             self.assertEqual(row["filter_status"], "FILTERED")
@@ -104,17 +106,21 @@ class NDigenomeTests(unittest.TestCase):
         self.assertEqual(rows[0]["opposite_count"], "0")
 
     def test_opposite_ranking_prefers_threshold_passing_fraction(self) -> None:
-        """Opposite ranking prefers a threshold-passing fraction."""
+        """An opposite endpoint passing count and fraction outranks one with
+        more reads whose fraction is below the threshold."""
         reads = [make_read(f"forward_{index}", 100) for index in range(8)]
         reads += [reverse_read_ending_at(f"reverse_100_{index}", 100) for index in range(10)]
-        reads += [reverse_read_ending_at(f"reverse_101_{index}", 101) for index in range(3)]
+        reads += [reverse_read_ending_at(f"reverse_101_{index}", 101) for index in range(11)]
+        # Reverse reads covering 101 but not 100 dilute 101's fraction to 11/111.
+        reads += [make_read(f"reverse_background_{index}", 101, reverse=True) for index in range(100)]
         bam = write_bam(self.tmp / "opposite_ranking.bam", [("chr1", 2000)], reads)
+        settings = make_settings("ndigenome", ndigenome_min_count=10)
         with pysam.AlignmentFile(str(bam), "rb") as bam_handle:
-            settings = make_settings("ndigenome")
             position, metrics = strongest_opposite(bam_handle, "chr1", 100, "+", settings, None)
+            competitor = measure_site(bam_handle, "chr1", 101, "-", 10, 1)
         self.assertEqual(position, 100)
-        self.assertEqual(metrics.endpoint_count, 10)
-        self.assertGreater(metrics.endpoint_fraction, 0.20)
+        self.assertEqual((metrics.endpoint_count, metrics.strand_depth), (10, 21))
+        self.assertEqual((competitor.endpoint_count, competitor.strand_depth), (11, 111))
 
     def test_weak_opposite_signal_is_ambiguous(self) -> None:
         """Weak opposite → AMBIGUOUS, tier manual_review."""
@@ -173,7 +179,7 @@ class NDigenomeTests(unittest.TestCase):
         prefix, qc = run_caller(settings, {"bam": bam, "control_bam": None, "vcf": None, "blacklist": None}, self.tmp, chunks=1, sample="softclip")
         row = self.read_rows("softclip")[0]
         self.assertEqual(row["tier"], "artifact")
-        self.assertIn("HIGH_5P_SOFTCLIP", row["filter_reasons"])
+        self.assertEqual(row["filter_reasons"], "HIGH_5P_SOFTCLIP")
         self.assertEqual(self.read_tier_rows("softclip", "manual_review"), [])
         self.assertEqual(len(self.read_tier_rows("softclip", "artifact")), 1)
 
@@ -211,7 +217,10 @@ class NDigenomeTests(unittest.TestCase):
         prefix, qc = run_caller(settings, {"bam": treated, "control_bam": control, "vcf": None, "blacklist": None}, self.tmp, chunks=1, sample="controlled", control_sample="Control")
         row = self.read_rows("controlled")[0]
         self.assertEqual(row["control_status"], "MATCHED_CONTROL")
-        self.assertLess(float(row["control_fisher_q"]), 0.05)
+        # One controlled row, so q equals p: Fisher on 10 of 30 treated vs 0 of 30 control.
+        expected_p = fisher_exact_two_sided(10, 20, 0, 30)
+        self.assertEqual(row["control_fisher_p"], format_value(expected_p))
+        self.assertEqual(row["control_fisher_q"], format_value(benjamini_hochberg([expected_p])[0]))
         self.assertEqual(row["filter_status"], "PASS")
 
     def test_zero_control_depth_insufficient(self) -> None:

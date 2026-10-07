@@ -254,12 +254,9 @@ class FinalizeTests(unittest.TestCase):
             chunked_qc["candidates_before_filters"],
         )
 
-        # Should have more candidates than just endpoints
-        self.assertGreater(serial_qc["candidates_before_filters"], len(positions))
-
-        # Record and remember the exact candidate count for assertion
-        candidates_count = serial_qc["candidates_before_filters"]
-        self.assertGreater(candidates_count, 21)
+        # Each of the 21 forward endpoints can pair with reverse endpoints at
+        # -2, 0, and +2, except at the two ends of the chain.
+        self.assertEqual(serial_qc["candidates_before_filters"], 21 * 3 - 2)
 
     def test_boundary_pair_with_overhang(self) -> None:
         """Forward 1001, reverse 999: chunks=2 == chunks=1, no duplicates."""
