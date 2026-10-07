@@ -1,46 +1,34 @@
 #!/usr/bin/env nextflow
 /*
- * Digenome-seq (DSB) and nDigenome-seq (SSB) cleavage calling from Illumina WGS.
+ * Digenome-seq (DSB) and nDigenome-seq (SSB) cleavage calling from Illumina
+ * WGS, or from aligned long reads with --long_reads.
  *
  *   SAMPLESHEET -> PREPARE_INDEX -> FASTP -> ALIGN -> CALL_CHUNK (n per sample)
  *   -> FINALIZE -> MULTIQC
  *
- * Calling rules live in bin/cleavage/ and docs/cleavage_algorithm.md.
+ * Long-read samples are aligned BAMs, so they skip PREPARE_INDEX, FASTP, and
+ * ALIGN. Calling rules live in bin/cleavage/ and docs/cleavage_algorithm.md.
  */
 
 include { validateParameters } from 'plugin/nf-schema'
 
 workflow {
     validateParameters()
-    def fasta = genomeFasta()
+    def fasta = params.long_reads ? null : genomeFasta()
     def settings = callerSettings()
     def settings_json = groovy.json.JsonOutput.toJson(settings)
     writeRunInfo(fasta, settings)
 
     def code = files("${projectDir}/bin/cleavage/*.py")
-    def samples = SAMPLESHEET(file(params.input), code)
-        .splitJson()
-        .map { record ->
-            def meta = [
-                sample: record.sample,
-                single_end: record.single_end,
-                control: record.control,
-                is_control: record.is_control,
-            ]
-            def vcf = record.variant_vcf ? [file(record.variant_vcf), file(record.variant_index)] : [[], []]
-            tuple(meta, record.fastq_1.collect { path -> file(path) }, record.fastq_2.collect { path -> file(path) }, vcf)
-        }
+    def samples = SAMPLESHEET(file(params.input), code).splitJson()
+    def aligned = params.long_reads ? LONG_READS(samples) : SHORT_READS(samples, fasta)
 
-    def index_prefix = PREPARE_INDEX(params.genome, fasta, params.ref_cache, file("${projectDir}/bin/prepare_bwamem2_index.sh"))
-        .map { output -> output.trim() }
-
-    FASTP(samples.map { meta, fastq_1, fastq_2, _vcf -> tuple(meta, fastq_1, fastq_2) })
-    ALIGN(FASTP.out.reads, index_prefix)
-
-    // Controls are aligned but not called; each treated sample is called
-    // against its named control, or with empty placeholders when it has none.
-    def vcfs = samples.map { meta, _fastq_1, _fastq_2, vcf -> tuple(meta.sample, vcf) }
-    def bams = ALIGN.out.bam.branch { meta, _bam, _bai ->
+    // Controls aren't called; each treated sample is called against its named
+    // control, or with empty placeholders when it has none.
+    def vcfs = samples.map { record ->
+        tuple(record.sample, record.variant_vcf ? [file(record.variant_vcf), file(record.variant_index)] : [[], []])
+    }
+    def bams = aligned.bam.branch { meta, _bam, _bai ->
         control: meta.is_control
         treated: true
     }
@@ -62,16 +50,50 @@ workflow {
     CALL_CHUNK(chunk_jobs, blacklist, code, settings_json)
     FINALIZE(CALL_CHUNK.out.groupTuple(size: params.cleavage_chunks), code, settings_json)
 
-    MULTIQC(
-        FASTP.out.qc
-            .mix(ALIGN.out.qc.flatten())
-            .mix(FINALIZE.out.multiqc)
-            .collect()
-    )
+    MULTIQC(aligned.qc.mix(FINALIZE.out.multiqc).collect())
 }
 
-// The FASTA configured for --genome.
+// Long-read samples are aligned BAMs, called as given.
+workflow LONG_READS {
+    take:
+    samples
+
+    emit:
+    bam = samples.map { record -> tuple(sampleMeta(record), file(record.bam), file(record.bam_index)) }
+    qc = channel.empty()
+}
+
+// Short reads are trimmed and aligned to --genome; their QC goes to MultiQC.
+workflow SHORT_READS {
+    take:
+    samples
+    fasta
+
+    main:
+    def index_prefix = PREPARE_INDEX(params.genome, fasta, params.ref_cache, file("${projectDir}/bin/prepare_bwamem2_index.sh"))
+        .map { output -> output.trim() }
+    FASTP(samples.map { record ->
+        def fastq_1 = record.fastq_1.collect { path -> file(path) }
+        def fastq_2 = record.fastq_2.collect { path -> file(path) }
+        tuple(sampleMeta(record) + [single_end: record.single_end], fastq_1, fastq_2)
+    })
+    ALIGN(FASTP.out.reads, index_prefix)
+
+    emit:
+    bam = ALIGN.out.bam
+    qc = FASTP.out.qc.mix(ALIGN.out.qc.flatten())
+}
+
+// What every process needs to know about a sample.
+def sampleMeta(record) {
+    return [sample: record.sample, control: record.control, is_control: record.is_control]
+}
+
+// The FASTA configured for --genome, which short reads are aligned to.
 def genomeFasta() {
+    if (!params.genome) {
+        error("--genome is required unless --long_reads is set")
+    }
     def genome = params.genomes[params.genome]
     if (!genome) {
         error("Unknown --genome '${params.genome}'. Configured genomes: ${params.genomes.keySet().join(', ')}")
@@ -149,14 +171,10 @@ process SAMPLESHEET {
     output:
     path 'samples.json'
 
+    // Stub runs check the sheet too: without a stub block, the script runs.
     script:
     """
-    python3 -m cleavage samplesheet input.csv samples.json --analysis ${params.analysis}
-    """
-
-    stub:
-    """
-    python3 -m cleavage samplesheet input.csv samples.json --analysis ${params.analysis}
+    python3 -m cleavage samplesheet input.csv samples.json --analysis ${params.analysis} ${params.long_reads ? '--long-reads' : ''}
     """
 }
 
@@ -278,8 +296,13 @@ process ALIGN {
 process CALL_CHUNK {
     tag "${meta.sample}:${chunk}"
 
+    // Long-read BAMs keep the user's file names, so the treated and control
+    // BAMs are staged apart, each beside its index.
     input:
-    tuple val(meta), path(bam), path(bai), path(control_bam), path(control_bai), path(vcf), path(vcf_index), val(chunk)
+    tuple val(meta),
+        path(bam, stageAs: 'treated/*'), path(bai, stageAs: 'treated/*'),
+        path(control_bam, stageAs: 'control/*'), path(control_bai, stageAs: 'control/*'),
+        path(vcf), path(vcf_index), val(chunk)
     path blacklist
     path code, stageAs: 'cleavage/*'
     val settings
@@ -289,14 +312,14 @@ process CALL_CHUNK {
 
     script:
     def prefix = "chunk_${chunk.toString().padLeft(3, '0')}"
-    def control = control_bam ? "--control-bam ${control_bam} --control-sample ${meta.control}" : ''
+    def control = control_bam ? "--control-bam ${quote(control_bam)} --control-sample ${meta.control}" : ''
     """
     cat > settings.json <<'JSON'
     ${settings}
     JSON
     python3 -m cleavage call \\
         --settings settings.json \\
-        --bam ${bam} \\
+        --bam ${quote(bam)} \\
         --sample ${meta.sample} \\
         --chunk ${chunk} \\
         --chunks ${params.cleavage_chunks} \\

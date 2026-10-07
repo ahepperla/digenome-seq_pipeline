@@ -63,7 +63,7 @@
         "keep_multimappers": {
           "type": "boolean",
           "default": false,
-          "description": "Run bwa-mem2 with -a, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement."
+          "description": "Run bwa-mem2 with -a, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement. With --long_reads only the MAPQ changes apply."
         },
         "long_reads": {
           "type": "boolean",

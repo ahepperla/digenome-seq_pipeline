@@ -177,13 +177,20 @@ class NextflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("had errors", result.stdout)
 
+    SHORT_READ_PROCESSES = {
+        "SAMPLESHEET", "SHORT_READS:PREPARE_INDEX", "SHORT_READS:FASTP", "SHORT_READS:ALIGN",
+        "CALL_CHUNK", "FINALIZE", "MULTIQC",
+    }
+
     def test_digenome_stub_run_publishes_every_output(self) -> None:
         samples = ["Treated", "Control", "Uncontrolled", "SingleEnd"]
         called = ["Treated", "Uncontrolled", "SingleEnd"]
-        out, settings = self.stub_run("digenome", samples, ["--keep_multimappers"])
+        out, info = self.stub_run("digenome", self.fastq_sheet, samples, ["--keep_multimappers"])
         self.assertEqual(self.published(out), self.expected_files("digenome", samples, called))
+        self.assertEqual(self.processes(out), self.SHORT_READ_PROCESSES)
         self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
         # --keep_multimappers lowers every MAPQ threshold together.
+        settings = info["caller_settings"]
         self.assertEqual(
             (settings["digenome_min_mapq"], settings["ndigenome_min_mapq"], settings["cleavage_min_support_mean_mapq"]),
             (0, 0, 0),
@@ -192,31 +199,41 @@ class NextflowTests(unittest.TestCase):
     def test_ndigenome_stub_run_publishes_every_output(self) -> None:
         samples = ["Treated", "Control", "Uncontrolled"]
         called = ["Treated", "Uncontrolled"]
-        out, settings = self.stub_run("ndigenome", samples, [])
+        out, info = self.stub_run("ndigenome", self.fastq_sheet, samples, [])
         self.assertEqual(self.published(out), self.expected_files("ndigenome", samples, called))
+        self.assertEqual(self.processes(out), self.SHORT_READ_PROCESSES)
         self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
+        settings = info["caller_settings"]
         self.assertEqual((settings["ndigenome_min_mapq"], settings["cleavage_min_support_mean_mapq"]), (1, 10))
 
-    def stub_run(self, analysis: str, samples: list[str], options: list[str]) -> tuple[Path, dict]:
-        """Run the stub workflow on empty FASTQs. Treated has two lanes and
-        uses Control; SingleEnd is single-end."""
+    def test_long_read_stub_run_calls_the_given_bams(self) -> None:
+        samples = ["Treated", "Control", "Uncontrolled"]
+        called = ["Treated", "Uncontrolled"]
+        # No --genome: long reads need no reference.
+        out, info = self.stub_run("ndigenome", self.bam_sheet, samples, ["--long_reads", "-params-file", "no_genome.json"])
+        aligned_outputs = ("bam/", "fastp/", "qc/")
+        self.assertEqual(
+            self.published(out),
+            {path for path in self.expected_files("ndigenome", samples, called) if not path.startswith(aligned_outputs)},
+        )
+        self.assertEqual(self.processes(out), {"SAMPLESHEET", "CALL_CHUNK", "FINALIZE", "MULTIQC"})
+        self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
+        self.assertEqual((info["genome"], info["fasta"]), (None, None))
+        # --long_reads loosens the clip and indel limits together.
+        settings = info["caller_settings"]
+        self.assertEqual(
+            (settings["long_reads"], settings["cleavage_max_softclip_fraction"], settings["cleavage_max_indel_fraction"]),
+            (True, 1.0, 1.0),
+        )
+
+    def stub_run(self, analysis: str, write_sheet, samples: list[str], options: list[str]) -> tuple[Path, dict]:
+        """Run the stub workflow on empty inputs from `write_sheet`; Treated
+        uses Control. Returns the output directory and analysis_parameters.json."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         directory = Path(temporary.name)
-        rows = ["sample,fastq_1,fastq_2,control"]
-        for sample in samples:
-            lanes = 2 if sample == "Treated" else 1
-            control = "Control" if sample == "Treated" else ""
-            for lane in range(lanes):
-                read1 = directory / f"{sample}_L{lane}_R1.fastq.gz"
-                read2 = directory / f"{sample}_L{lane}_R2.fastq.gz"
-                read1.touch()
-                if sample == "SingleEnd":
-                    rows.append(f"{sample},{read1},,{control}")
-                else:
-                    read2.touch()
-                    rows.append(f"{sample},{read1},{read2},{control}")
-        (directory / "samplesheet.csv").write_text("\n".join(rows) + "\n")
+        (directory / "samplesheet.csv").write_text(write_sheet(directory, samples))
+        (directory / "no_genome.json").write_text('{"genome": null}\n')
         out = directory / "results"
         environment = {
             **os.environ,
@@ -235,8 +252,43 @@ class NextflowTests(unittest.TestCase):
             cwd=directory, env=environment, capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-3000:])
-        info = json.loads((out / "pipeline_info" / "analysis_parameters.json").read_text())
-        return out, info["caller_settings"]
+        return out, json.loads((out / "pipeline_info" / "analysis_parameters.json").read_text())
+
+    @staticmethod
+    def fastq_sheet(directory: Path, samples: list[str]) -> str:
+        """Empty FASTQs. Treated has two lanes; SingleEnd is single-end."""
+        rows = ["sample,fastq_1,fastq_2,control"]
+        for sample in samples:
+            lanes = 2 if sample == "Treated" else 1
+            control = "Control" if sample == "Treated" else ""
+            for lane in range(lanes):
+                read1 = directory / f"{sample}_L{lane}_R1.fastq.gz"
+                read2 = directory / f"{sample}_L{lane}_R2.fastq.gz"
+                read1.touch()
+                if sample == "SingleEnd":
+                    rows.append(f"{sample},{read1},,{control}")
+                else:
+                    read2.touch()
+                    rows.append(f"{sample},{read1},{read2},{control}")
+        return "\n".join(rows) + "\n"
+
+    @staticmethod
+    def bam_sheet(directory: Path, samples: list[str]) -> str:
+        """Empty indexed BAMs, all named reads.bam, so the treated and control
+        BAMs of one task share a file name."""
+        rows = ["sample,bam,control"]
+        for sample in samples:
+            bam = directory / sample / "reads.bam"
+            bam.parent.mkdir()
+            bam.touch()
+            Path(f"{bam}.bai").touch()
+            rows.append(f"{sample},{bam},{'Control' if sample == 'Treated' else ''}")
+        return "\n".join(rows) + "\n"
+
+    @staticmethod
+    def processes(out: Path) -> set[str]:
+        with (out / "pipeline_info" / "trace.txt").open(newline="") as handle:
+            return {row["name"].split(" (")[0] for row in csv.DictReader(handle, delimiter="\t")}
 
     @staticmethod
     def published(out: Path) -> set[str]:

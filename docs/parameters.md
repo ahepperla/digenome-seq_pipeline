@@ -42,7 +42,7 @@ defaults are `GRCh38`, `GRCh37`, and `GRCm39`.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--keep_multimappers` | Boolean | `false` | Run bwa-mem2 with `-a`, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement. |
+| `--keep_multimappers` | Boolean | `false` | Run bwa-mem2 with `-a`, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement. With `--long_reads` only the MAPQ changes apply. |
 | `--cleavage_chunks` | Integer | `8` | Coordinate chunks per sample, each called by a one-CPU task. Changes runtime, never results. |
 | `--long_reads` | Boolean | `false` | Call long-read (ONT/PacBio) samples from aligned BAMs given in the samplesheet's `bam` column; trimming and alignment are skipped. Both aligned ends of each read count (see [cleavage_algorithm.md](cleavage_algorithm.md#long-reads)), and `--cleavage_max_softclip_fraction` and `--cleavage_max_indel_fraction` become 1.0 because nanopore reads routinely carry small indels and clipped ends. |
 
