@@ -23,13 +23,23 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-sys.path.insert(0, str(ROOT / "tests"))
-from test_golden import expected_bed, expected_rows  # noqa: E402  (also puts bin/ on sys.path)
+sys.path.insert(0, str(ROOT / "bin"))
 
 import pysam  # noqa: E402
+from cleavage.output import DIGENOME_COLUMNS, NDIGENOME_COLUMNS  # noqa: E402
 from cleavage.settings import CallerSettings  # noqa: E402
 
 TIERS = ["all", "high_confidence", "manual_review", "artifact"]
+# New Digenome column -> old column, where the name changed (decision
+# "Streamlined, mode-specific output columns" in docs/decisions.md).
+RENAMED = {
+    "combined_endpoint_count": "endpoint_count",
+    "combined_depth": "strand_depth",
+    "combined_fraction": "endpoint_fraction",
+    "control_combined_endpoint_count": "control_endpoint_count",
+    "control_combined_depth": "control_depth",
+    "control_combined_fraction": "control_fraction",
+}
 # ru_maxrss is in KiB on Linux and in bytes on macOS.
 RSS_UNITS_PER_MB = 1024 * 1024 if sys.platform == "darwin" else 1024
 
@@ -137,19 +147,44 @@ def run_new(args, directory: Path, timings: list[dict]) -> str:
     return str(directory / "Sample")
 
 
+def legacy_tier(row: dict[str, str]) -> str:
+    if row["filter_status"] == "PASS":
+        return "high_confidence"
+    return "artifact" if row["classification"] == "ARTIFACT_RISK" else "manual_review"
+
+
+def legacy_rows_in_new_layout(path: Path, analysis: str, contig_order: dict[str, int]) -> list[list[str]]:
+    """Old rows mapped to the new columns and sorted in the new order."""
+    columns = DIGENOME_COLUMNS if analysis == "digenome" else NDIGENOME_COLUMNS
+    position = "forward_position_0based" if analysis == "digenome" else "position_0based"
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    rows.sort(key=lambda row: (contig_order[row["contig"]], int(row[position]), row["strand"]))
+    mapped = []
+    for row in rows:
+        row["tier"] = legacy_tier(row)
+        mapped.append([row[RENAMED.get(column, column)] for column in columns])
+    return mapped
+
+
+def legacy_bed_in_new_order(path: Path, contig_order: dict[str, int]) -> list[str]:
+    lines = path.read_text().splitlines()
+    return sorted(lines, key=lambda line: (contig_order[line.split("\t")[0]], int(line.split("\t")[1])))
+
+
 def compare(args, legacy_prefix: str, new_prefix: str) -> list[str]:
     """Names of the output files whose values differ."""
     with pysam.AlignmentFile(args.bam, "rb") as bam:
         order = {name: index for index, name in enumerate(bam.references)}
     differences = []
     for tier in TIERS:
-        expected = expected_rows(Path(f"{legacy_prefix}.{args.analysis}.{tier}.tsv"), args.analysis, order)
+        expected = legacy_rows_in_new_layout(Path(f"{legacy_prefix}.{args.analysis}.{tier}.tsv"), args.analysis, order)
         with open(f"{new_prefix}.{args.analysis}.{tier}.tsv", newline="") as handle:
             observed = list(csv.reader(handle, delimiter="\t"))[1:]
         if observed != expected:
             differences.append(f"{tier}.tsv")
     bed = Path(f"{new_prefix}.{args.analysis}.bed").read_text().splitlines()
-    if bed != expected_bed(Path(f"{legacy_prefix}.{args.analysis}.bed"), order):
+    if bed != legacy_bed_in_new_order(Path(f"{legacy_prefix}.{args.analysis}.bed"), order):
         differences.append("bed")
     return differences
 

@@ -1,0 +1,6 @@
+# id: ndigenome_summary
+# section_name: ndigenome cleavage summary
+# description: Cleavage calls per sample
+# plot_type: table
+Sample	Reported candidates	High-confidence calls	Manual-review candidates	Artifact candidates	SSB	Possible DSB	Ambiguous
+Sample	3	1	2	0	1	2	0

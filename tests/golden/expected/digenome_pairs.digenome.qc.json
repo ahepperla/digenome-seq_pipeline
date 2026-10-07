@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "sample": "Sample",
+  "analysis": "digenome",
+  "control_sample": "",
+  "settings": {
+    "analysis": "digenome",
+    "keep_multimappers": false,
+    "digenome_overhang": 0,
+    "digenome_pair_window": 2,
+    "digenome_min_mapq": 1,
+    "digenome_forward_cutoff": 4,
+    "digenome_reverse_cutoff": 4,
+    "digenome_depth_cutoff": 10,
+    "digenome_fraction_cutoff": 0.2,
+    "digenome_pair_score_cutoff": 0.5,
+    "ndigenome_min_count": 5,
+    "ndigenome_min_fraction": 0.2,
+    "ndigenome_min_mapq": 1,
+    "ndigenome_opposite_window": 5,
+    "ndigenome_ambiguous_min_count": 2,
+    "ndigenome_ambiguous_min_fraction": 0.05,
+    "cleavage_artifact_window": 10,
+    "cleavage_max_softclip_fraction": 0.2,
+    "cleavage_max_indel_fraction": 0.2,
+    "cleavage_min_support_mean_mapq": 10.0,
+    "cleavage_control_min_depth": 1,
+    "cleavage_control_max_fraction": 0.05,
+    "cleavage_control_min_fold": 3.0,
+    "cleavage_control_max_q": 0.05
+  },
+  "genome_blacklist": null,
+  "candidates_before_filters": 4,
+  "warnings": [],
+  "rows": 3,
+  "tiers": {
+    "high_confidence": 1,
+    "manual_review": 1,
+    "artifact": 1
+  }
+}

@@ -1,0 +1,11 @@
+sample	analysis	contig	position_0based	position_1based	strand	signal_classification	tier	filter_status	filter_reasons	endpoint_count	strand_depth	endpoint_fraction	opposite_position_0based	opposite_position_1based	opposite_count	opposite_depth	opposite_fraction	support_mean_mapq	local_mean_mapq	support_mean_nm	local_mean_nm	softclip_fraction	secondary_endpoint_count	indel_position_0based	indel_position_1based	indel_type	indel_length	indel_read_count	indel_fraction	known_indel_overlap	control_sample	control_status	control_endpoint_count	control_depth	control_fraction	control_fold_enrichment	control_fisher_p	control_fisher_q
+Sample	ndigenome	chr1	980	981	+	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	5	1	982	983	5	100	0.05	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			
+Sample	ndigenome	chr1	982	983	+	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	10	0.5	984	985	5	95	0.052631579	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			
+Sample	ndigenome	chr1	984	985	+	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	15	0.33333333	986	987	5	90	0.055555556	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			
+Sample	ndigenome	chr1	986	987	+	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	20	0.25	988	989	5	85	0.058823529	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			
+Sample	ndigenome	chr1	988	989	+	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	25	0.2	990	991	5	80	0.0625	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			
+Sample	ndigenome	chr1	1012	1013	-	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	25	0.2	1010	1011	5	80	0.0625	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			
+Sample	ndigenome	chr1	1014	1015	-	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	20	0.25	1012	1013	5	85	0.058823529	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			
+Sample	ndigenome	chr1	1016	1017	-	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	15	0.33333333	1014	1015	5	90	0.055555556	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			
+Sample	ndigenome	chr1	1018	1019	-	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	10	0.5	1016	1017	5	95	0.052631579	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			
+Sample	ndigenome	chr1	1020	1021	-	AMBIGUOUS	manual_review	FILTERED	AMBIGUOUS	5	5	1	1018	1019	5	100	0.05	0	0	0	0	0	0				0	0	0			UNCONTROLLED	0	0	0			

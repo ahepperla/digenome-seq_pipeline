@@ -5,8 +5,8 @@ runs the pre-refactor caller (commit `b9455e2`) and the new one inside the
 cleavage image on the same BAM, with the same chunk count and the pipeline's
 default thresholds, one step at a time. It prints wall time, CPU time, and
 peak memory for every step, then checks that every output value matches once
-the old columns are mapped to the new layout (the mapping is in
-`tests/test_golden.py`). It exits 1 if any output differs.
+the old columns are mapped to the new layout (`legacy_rows_in_new_layout` in
+`benchmark.py`). It exits 1 if any output differs.
 
 ```bash
 cd /path/to/digenome-seq_pipeline          # on branch refactor/from-scratch

@@ -12,10 +12,11 @@ The suite needs Python with pysam 0.23.3 (matching the cleavage image) and no
 production data. It runs `bash -n` on the shell scripts and every unittest:
 
 - **Golden outputs** (`test_golden.py`): six synthetic scenarios in both modes
-  at 1, 2, and 4 chunks must reproduce every value the pre-refactor caller
-  wrote (`tests/golden/legacy/`, with old columns mapped to the new layout).
-  `python3 tests/golden/build_legacy.py` regenerates those files from commit
-  `b9455e2`.
+  at 1, 2, and 4 chunks must match `tests/golden/expected/` byte for byte.
+  When written, those files were checked value by value against the
+  pre-refactor caller (commit `b9455e2`). `python3 tests/golden/build_expected.py`
+  rewrites them; do that only when the project lead has approved an output
+  change.
 - **Caller units**: endpoints and read filters, site metrics, the RGEN score,
   nDigenome classes and ranking, Digenome pairing and matching, controls,
   Fisher and Benjamini–Hochberg, filters and tiers, the blacklist, the chunk
@@ -32,9 +33,13 @@ production data. It runs `bash -n` on the shell scripts and every unittest:
   checking every published file, one chunk task per chunk per called sample,
   that controls are not called, and the `--keep_multimappers` settings.
 
+The workflow tests use `$NEXTFLOW` if set, else `nextflow` on PATH. Run them
+on Longleaf's version with `NEXTFLOW=nextflow-25.04.7 ./tests/run_tests.sh`.
+
 Nextflow 25.10 and later parse command-line parameters as strings under their
-strict parser, which nf-schema 2.5.1 then rejects. For local runs, set
-`NXF_SYNTAX_PARSER=v1` to match Longleaf's Nextflow 25.04; the stub tests do.
+strict parser, which nf-schema 2.5.1 then rejects. For local runs with a newer
+Nextflow, set `NXF_SYNTAX_PARSER=v1` to match Longleaf's 25.04; the stub tests
+do.
 
 ## Smoke test with real tools
 

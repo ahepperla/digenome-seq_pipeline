@@ -1,0 +1,6 @@
+# id: digenome_summary
+# section_name: digenome cleavage summary
+# description: Cleavage calls per sample
+# plot_type: table
+Sample	Reported candidates	High-confidence calls	Manual-review candidates	Artifact candidates
+Sample	21	0	21	0
