@@ -388,6 +388,246 @@ class SamplesheetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fastq_1 is blank"):
             validate_samplesheet(input_csv, "digenome")
 
+    def test_valid_long_read_sheet_with_treated_and_control(self) -> None:
+        """Test valid long-read sheet with treated sample and control."""
+        treated_bam = self.tmp / "treated.bam"
+        treated_bam.touch()
+        Path(f"{treated_bam}.bai").touch()
+        control_bam = self.tmp / "control.bam"
+        control_bam.touch()
+        Path(f"{control_bam}.bai").touch()
+        vcf = self.tmp / "donor.vcf.gz"
+        vcf.touch()
+        Path(f"{vcf}.tbi").touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam,control,variant_vcf\n"
+            f"Treated,{treated_bam},Control,{vcf}\n"
+            f"Control,{control_bam},,\n"
+        )
+        records = validate_samplesheet(input_csv, "digenome", long_reads=True)
+        self.assertEqual(len(records), 2)
+
+        treated = records[0]
+        self.assertEqual(treated["sample"], "Control")
+        self.assertEqual(treated["bam"], str(control_bam.resolve()))
+        self.assertEqual(treated["bam_index"], str(control_bam.resolve()) + ".bai")
+        self.assertEqual(treated["control"], "")
+        self.assertEqual(treated["variant_vcf"], "")
+        self.assertEqual(treated["variant_index"], "")
+        self.assertTrue(treated["is_control"])
+
+        control = records[1]
+        self.assertEqual(control["sample"], "Treated")
+        self.assertEqual(control["bam"], str(treated_bam.resolve()))
+        self.assertEqual(control["bam_index"], str(treated_bam.resolve()) + ".bai")
+        self.assertEqual(control["control"], "Control")
+        self.assertEqual(control["variant_vcf"], str(vcf.resolve()))
+        self.assertEqual(control["variant_index"], str(vcf.resolve()) + ".tbi")
+        self.assertFalse(control["is_control"])
+
+    def test_long_read_sheet_with_csi_index(self) -> None:
+        """Test that .csi index is accepted for long-read BAM."""
+        bam = self.tmp / "sample.bam"
+        bam.touch()
+        Path(f"{bam}.csi").touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            f"Sample,{bam}\n"
+        )
+        records = validate_samplesheet(input_csv, "digenome", long_reads=True)
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["bam_index"].endswith(".csi"))
+
+    def test_long_read_missing_bam_index_rejected(self) -> None:
+        """Test that BAM without .bai or .csi index is rejected."""
+        bam = self.tmp / "sample.bam"
+        bam.touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            f"Sample,{bam}\n"
+        )
+        with self.assertRaisesRegex(ValueError, "not indexed with .bai or .csi"):
+            validate_samplesheet(input_csv, "digenome", long_reads=True)
+
+    def test_long_read_non_bam_suffix_rejected(self) -> None:
+        """Test that non-.bam path is rejected."""
+        file_path = self.tmp / "sample.txt"
+        file_path.touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            f"Sample,{file_path}\n"
+        )
+        with self.assertRaisesRegex(ValueError, "must end with .bam"):
+            validate_samplesheet(input_csv, "digenome", long_reads=True)
+
+    def test_long_read_missing_bam_file_rejected(self) -> None:
+        """Test that missing BAM file is rejected."""
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            "Sample,/nonexistent/sample.bam\n"
+        )
+        with self.assertRaisesRegex(ValueError, "file does not exist"):
+            validate_samplesheet(input_csv, "digenome", long_reads=True)
+
+    def test_long_read_blank_bam_rejected(self) -> None:
+        """Test that blank bam is rejected."""
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            "Sample,\n"
+        )
+        with self.assertRaisesRegex(ValueError, "bam is blank"):
+            validate_samplesheet(input_csv, "digenome", long_reads=True)
+
+    def test_long_read_bam_reuse_rejected(self) -> None:
+        """Test that the same BAM on two rows is rejected."""
+        bam = self.tmp / "shared.bam"
+        bam.touch()
+        Path(f"{bam}.bai").touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            f"Sample1,{bam}\n"
+            f"Sample2,{bam}\n"
+        )
+        with self.assertRaisesRegex(ValueError, "reuses BAM"):
+            validate_samplesheet(input_csv, "digenome", long_reads=True)
+
+    def test_long_read_one_sample_one_row_enforced(self) -> None:
+        """Test that one sample can have only one row in long-read mode."""
+        bam1 = self.tmp / "sample1.bam"
+        bam1.touch()
+        Path(f"{bam1}.bai").touch()
+        bam2 = self.tmp / "sample2.bam"
+        bam2.touch()
+        Path(f"{bam2}.bai").touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            f"Sample,{bam1}\n"
+            f"Sample,{bam2}\n"
+        )
+        with self.assertRaisesRegex(ValueError, "has more than one row"):
+            validate_samplesheet(input_csv, "digenome", long_reads=True)
+
+    def test_short_read_rejects_fastq_columns_in_long_read_mode(self) -> None:
+        """Test that fastq_1/fastq_2 columns are rejected with --long_reads."""
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,fastq_1,fastq_2\n"
+            f"Sample,/path/to/R1.fastq.gz,/path/to/R2.fastq.gz\n"
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "With --long_reads the samplesheet lists aligned BAMs in a bam column, not fastq_1/fastq_2"
+        ):
+            validate_samplesheet(input_csv, "digenome", long_reads=True)
+
+    def test_short_read_rejects_bam_column_without_long_reads(self) -> None:
+        """Test that bam column is rejected without --long_reads."""
+        bam = self.tmp / "sample.bam"
+        bam.touch()
+        Path(f"{bam}.bai").touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            f"Sample,{bam}\n"
+        )
+        with self.assertRaisesRegex(ValueError, "The bam column needs --long_reads"):
+            validate_samplesheet(input_csv, "digenome", long_reads=False)
+
+    def test_long_read_shared_control_allowed(self) -> None:
+        """Test that one control can be shared by multiple treated samples."""
+        treated1_bam = self.tmp / "treated1.bam"
+        treated1_bam.touch()
+        Path(f"{treated1_bam}.bai").touch()
+        treated2_bam = self.tmp / "treated2.bam"
+        treated2_bam.touch()
+        Path(f"{treated2_bam}.bai").touch()
+        control_bam = self.tmp / "control.bam"
+        control_bam.touch()
+        Path(f"{control_bam}.bai").touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam,control\n"
+            f"Control,{control_bam},\n"
+            f"Treated1,{treated1_bam},Control\n"
+            f"Treated2,{treated2_bam},Control\n"
+        )
+        records = validate_samplesheet(input_csv, "digenome", long_reads=True)
+        records_by_sample = {r["sample"]: r for r in records}
+        self.assertEqual(records_by_sample["Treated1"]["control"], "Control")
+        self.assertEqual(records_by_sample["Treated2"]["control"], "Control")
+        self.assertTrue(records_by_sample["Control"]["is_control"])
+        self.assertFalse(records_by_sample["Treated1"]["is_control"])
+        self.assertFalse(records_by_sample["Treated2"]["is_control"])
+
+    def test_long_read_control_chain_rejected(self) -> None:
+        """Test that control chains are rejected in long-read mode."""
+        treated_bam = self.tmp / "treated.bam"
+        treated_bam.touch()
+        Path(f"{treated_bam}.bai").touch()
+        control_a_bam = self.tmp / "control_a.bam"
+        control_a_bam.touch()
+        Path(f"{control_a_bam}.bai").touch()
+        control_b_bam = self.tmp / "control_b.bam"
+        control_b_bam.touch()
+        Path(f"{control_b_bam}.bai").touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam,control\n"
+            f"Treated,{treated_bam},ControlA\n"
+            f"ControlA,{control_a_bam},ControlB\n"
+            f"ControlB,{control_b_bam},\n"
+        )
+        with self.assertRaisesRegex(ValueError, "but declares control"):
+            validate_samplesheet(input_csv, "digenome", long_reads=True)
+
+    def test_long_read_ndigenome_allowed(self) -> None:
+        """Test that ndigenome analysis is allowed with long reads."""
+        bam = self.tmp / "sample.bam"
+        bam.touch()
+        Path(f"{bam}.bai").touch()
+
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            f"Sample,{bam}\n"
+        )
+        records = validate_samplesheet(input_csv, "ndigenome", long_reads=True)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["sample"], "Sample")
+
+    def test_long_read_multiple_problems_reported(self) -> None:
+        """Test that multiple problems are reported together."""
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text(
+            "sample,bam\n"
+            "Sample1,/missing1.bam\n"
+            "Sample2,/missing2.bam\n"
+        )
+        try:
+            validate_samplesheet(input_csv, "digenome", long_reads=True)
+            self.fail("Should have raised ValueError")
+        except ValueError as e:
+            error_msg = str(e)
+            self.assertIn("missing1.bam", error_msg)
+            self.assertIn("missing2.bam", error_msg)
+
 
 if __name__ == "__main__":
     unittest.main()
