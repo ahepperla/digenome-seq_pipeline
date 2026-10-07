@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""Create deterministic DSB/SSB FASTQs and a smoke-test samplesheet."""
+"""Write the tiny smoke-test inputs to tests/fixtures/generated/.
+
+The paired FASTQs align uniquely to tiny.fa and contain:
+- a DSB at 250: 11 forward reads start there and 11 reverse reads end there;
+- an SSB at 300: 11 forward reads start there and their mates vary.
+Every fragment has distinct coordinates, so duplicate marking keeps them all.
+
+Usage: python3 tests/fixtures/build_smoke_fixture.py
+"""
 
 from __future__ import annotations
 
-import csv
 import gzip
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+OUTPUT = HERE / "generated"
 READ_LENGTH = 60
 DSB_POSITION = 250
 SSB_POSITION = 300
@@ -18,99 +26,41 @@ def reverse_complement(sequence: str) -> str:
     return sequence.translate(str.maketrans("ACGT", "TGCA"))[::-1]
 
 
-def read_reference() -> str:
-    return "".join(
-        line.strip()
-        for line in (HERE / "tiny.fa").read_text().splitlines()
-        if not line.startswith(">")
-    )
+def reference() -> str:
+    lines = (HERE / "tiny.fa").read_text().splitlines()
+    return "".join(line.strip() for line in lines if not line.startswith(">"))
 
 
-def paired_reads(
-    reference: str,
-    name: str,
-    forward_start: int,
-    reverse_end: int,
-) -> tuple[tuple[str, str], tuple[str, str]]:
-    read1 = reference[forward_start : forward_start + READ_LENGTH]
-    read2_reference = reference[reverse_end - READ_LENGTH : reverse_end]
-    if len(read1) != READ_LENGTH or len(read2_reference) != READ_LENGTH:
-        raise ValueError(f"Read coordinates are outside tiny.fa for {name}")
-    return (
-        (f"@{name}/1", read1),
-        (f"@{name}/2", reverse_complement(read2_reference)),
-    )
+def fragments() -> list[tuple[str, int, int]]:
+    """(name, forward read start, reverse read end + 1) for every fragment."""
+    dsb_forward = [(f"dsb_forward_{i + 1}", DSB_POSITION, 380 + i * 4) for i in range(PILEUP_COUNT)]
+    dsb_reverse = [(f"dsb_reverse_{i + 1}", 40 + i * 7, DSB_POSITION + 1) for i in range(PILEUP_COUNT)]
+    ssb = [(f"ssb_forward_{i + 1}", SSB_POSITION, 440 + i * 5) for i in range(PILEUP_COUNT)]
+    return dsb_forward + dsb_reverse + ssb
 
 
-def write_fastq(path: Path, records: list[tuple[str, str]]) -> None:
-    with path.open("w") as handle:
-        for name, sequence in records:
-            handle.write(
-                f"{name}\n{sequence}\n+\n{'I' * len(sequence)}\n"
-            )
+def read_pair(sequence: str, forward_start: int, reverse_end: int) -> tuple[str, str]:
+    read1 = sequence[forward_start:forward_start + READ_LENGTH]
+    read2 = reverse_complement(sequence[reverse_end - READ_LENGTH:reverse_end])
+    if len(read1) != READ_LENGTH or len(read2) != READ_LENGTH:
+        raise ValueError("Read coordinates are outside tiny.fa")
+    return read1, read2
 
 
-def gzip_file(source: Path, destination: Path) -> None:
-    with source.open("rb") as input_handle, gzip.open(destination, "wb") as output:
-        output.write(input_handle.read())
-
-
-def main() -> None:
-    reference = read_reference()
-    read1_records: list[tuple[str, str]] = []
-    read2_records: list[tuple[str, str]] = []
-
-    # Forward reads pile up at the DSB while mate endpoints vary.
-    for index in range(PILEUP_COUNT):
-        read1, read2 = paired_reads(
-            reference,
-            f"dsb_forward_{index + 1}",
-            DSB_POSITION,
-            380 + index * 4,
-        )
-        read1_records.append(read1)
-        read2_records.append(read2)
-
-    # Reverse reads pile up at the same DSB while mate starts vary.
-    for index in range(PILEUP_COUNT):
-        read1, read2 = paired_reads(
-            reference,
-            f"dsb_reverse_{index + 1}",
-            40 + index * 7,
-            DSB_POSITION + 1,
-        )
-        read1_records.append(read1)
-        read2_records.append(read2)
-
-    # A separate one-strand pileup provides a high-confidence SSB in nDigenome.
-    for index in range(PILEUP_COUNT):
-        read1, read2 = paired_reads(
-            reference,
-            f"ssb_forward_{index + 1}",
-            SSB_POSITION,
-            440 + index * 5,
-        )
-        read1_records.append(read1)
-        read2_records.append(read2)
-
-    plain_r1 = HERE / "tiny_R1.fastq"
-    plain_r2 = HERE / "tiny_R2.fastq"
-    write_fastq(plain_r1, read1_records)
-    write_fastq(plain_r2, read2_records)
-
-    r1 = HERE / "tiny_R1.fastq.gz"
-    r2 = HERE / "tiny_R2.fastq.gz"
-    gzip_file(plain_r1, r1)
-    gzip_file(plain_r2, r2)
-    with (HERE / "tiny_samplesheet.csv").open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["sample", "fastq_1", "fastq_2"])
-        writer.writerow(["Tiny", r1.resolve(), r2.resolve()])
-    print(
-        f"{HERE / 'tiny_samplesheet.csv'} "
-        f"({len(read1_records)} pairs; DSB={DSB_POSITION}, SSB={SSB_POSITION})"
-    )
+def build(directory: Path = OUTPUT) -> Path:
+    """Write tiny_R1/R2.fastq.gz and samplesheet.csv; return the samplesheet."""
+    directory.mkdir(parents=True, exist_ok=True)
+    sequence = reference()
+    read1_path, read2_path = directory / "tiny_R1.fastq.gz", directory / "tiny_R2.fastq.gz"
+    with gzip.open(read1_path, "wt") as read1_file, gzip.open(read2_path, "wt") as read2_file:
+        for name, forward_start, reverse_end in fragments():
+            read1, read2 = read_pair(sequence, forward_start, reverse_end)
+            read1_file.write(f"@{name}/1\n{read1}\n+\n{'I' * READ_LENGTH}\n")
+            read2_file.write(f"@{name}/2\n{read2}\n+\n{'I' * READ_LENGTH}\n")
+    samplesheet = directory / "samplesheet.csv"
+    samplesheet.write_text(f"sample,fastq_1,fastq_2\nTiny,{read1_path},{read2_path}\n")
+    return samplesheet
 
 
 if __name__ == "__main__":
-    main()
+    print(f"Wrote {build()} ({len(fragments())} read pairs)")

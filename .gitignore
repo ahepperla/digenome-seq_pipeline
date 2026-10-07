@@ -2,13 +2,9 @@
 .nextflow*
 work/
 results/
-reference_cache/*
-!reference_cache/.gitkeep
-tests/fixtures/*.fastq.gz
-tests/fixtures/tiny_samplesheet.csv
-tests/fixtures/reference_cache/
-smoke_results/
-smoke_work/
+smoke_*/
+reference_cache/
 containers/*.sif
-.venv/
+tests/fixtures/generated/
 __pycache__/
+.venv/
