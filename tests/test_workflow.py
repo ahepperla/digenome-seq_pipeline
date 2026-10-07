@@ -1,8 +1,9 @@
 """Checks on the Nextflow workflow, its configuration, and its inputs.
 
-The lint and stub-run tests need `nextflow` on PATH and are skipped without
-it. Stub runs use NXF_SYNTAX_PARSER=v1, which matches how Longleaf's
-Nextflow 25.04 parses command-line parameters.
+The lint and stub-run tests use $NEXTFLOW if set (for example
+NEXTFLOW=nextflow-25.04.7 to match Longleaf), else `nextflow` on PATH, and are
+skipped when neither exists. Stub runs set NXF_SYNTAX_PARSER=v1 so that newer
+Nextflow parses command-line parameters the way Longleaf's 25.04 does.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 import build_smoke_fixture  # noqa: E402
 from cleavage.settings import CallerSettings  # noqa: E402
 
-NEXTFLOW = shutil.which("nextflow")
+NEXTFLOW = shutil.which(os.environ.get("NEXTFLOW", "nextflow"))
 
 
 def config_parameters() -> dict[str, str]:
