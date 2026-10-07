@@ -1,0 +1,6 @@
+# id: ndigenome_summary
+# section_name: ndigenome cleavage summary
+# description: Unified strand-aware cleavage endpoint calls
+# plot_type: table
+Sample	Reported candidates	High-confidence calls	Manual-review candidates	Artifact candidates	DSB	SSB	Possible DSB	Ambiguous
+Sample	10	0	10	0	0	0	0	10

@@ -1,0 +1,17 @@
+{
+  "artifact_candidates": 8,
+  "candidate_endpoints_or_pairs_before_filters": 10,
+  "classifications": {
+    "ARTIFACT_RISK": 8,
+    "POSSIBLE_DSB": 1,
+    "SSB": 1
+  },
+  "high_confidence_calls": 1,
+  "manual_review_candidates": 1,
+  "reported_candidates": 10,
+  "signal_classifications": {
+    "AMBIGUOUS": 1,
+    "POSSIBLE_DSB": 4,
+    "SSB": 5
+  }
+}

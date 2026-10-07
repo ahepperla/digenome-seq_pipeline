@@ -1,0 +1,13 @@
+{
+  "artifact_candidates": 0,
+  "candidate_endpoints_or_pairs_before_filters": 61,
+  "classifications": {
+    "DSB": 21
+  },
+  "high_confidence_calls": 0,
+  "manual_review_candidates": 21,
+  "reported_candidates": 21,
+  "signal_classifications": {
+    "DSB": 21
+  }
+}

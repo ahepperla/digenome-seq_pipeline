@@ -1,0 +1,13 @@
+{
+  "artifact_candidates": 0,
+  "candidate_endpoints_or_pairs_before_filters": 42,
+  "classifications": {
+    "AMBIGUOUS": 10
+  },
+  "high_confidence_calls": 0,
+  "manual_review_candidates": 10,
+  "reported_candidates": 10,
+  "signal_classifications": {
+    "AMBIGUOUS": 10
+  }
+}
