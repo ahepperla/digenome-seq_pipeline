@@ -7,7 +7,7 @@ This page is the authoritative lookup for pipeline parameters in
 nextflow run /path/to/digenome-seq_pipeline \
   -profile longleaf \
   --input samplesheet.csv \
-  --genome hg38 \
+  --genome GRCh38 \
   --analysis ndigenome \
   --cleavage_chunks 64
 ```
@@ -17,60 +17,47 @@ set explicitly with `true` or `false`. Quote paths and free-form strings when
 they contain spaces.
 
 `nextflow_schema.json` defines every accepted pipeline parameter, type,
-default, required value, choice, and numeric range. A preflight task rejects
-unknown parameters and invalid values, checks configured input/reference/
-blacklist/container/bind paths, and checks output/cache accessibility before
-samplesheet validation or reference-index preparation can begin. Its report
-is published as `<outdir>/pipeline_info/preflight.ready.json`.
+default, required value, choice, and numeric range. The nf-schema plugin
+(pinned 2.5.1) validates parameters at launch: it rejects unknown parameters
+and invalid values, and checks that required parameters are supplied.
 
-## Required inputs and references
+## Inputs and outputs
 
 | Parameter | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `--input` | Path | `null` | Yes | Input samplesheet CSV. See the samplesheet section of the main README for columns and validation rules. |
-| `--genome` | String | `null` | Yes | Configured genome name or alias. Defaults supplied by the repository are `GRCh38`/`hg38`, `GRCh37`/`hg19`, and `GRCm39`/`mm39`. Matching is case-insensitive. |
-| `--analysis` | Choice | `digenome` | No | Calling mode: `digenome` for paired DSB endpoints or `ndigenome` for strand-specific SSB endpoints. One mode applies to the complete run. |
-| `--outdir` | Path | `results` | No | Published output directory. Use a separate output directory for each independent run. |
-| `--genome_blacklist` | Path | `null` | No | Optional BED or BED.gz mask using BAM-matching contig names and 0-based half-open coordinates. Masked regions are skipped during candidate scanning. Masked focal endpoints, Digenome pair endpoints, and nDigenome opposite-strand evidence are excluded. |
-| `--ref_cache` | Path | `${projectDir}/reference_cache` | No | Shared, content-addressed bwa-mem2 index cache stored under `<ref_cache>/<genome>/<fasta_sha256>/<bwa_mem2_version>/bwamem2/`. The helper applies explicit shared permissions independent of user umask. The Longleaf profile also uses this project-relative default. |
-| `params.genomes` | Map | Repository genome map | Configuration | Maps genome names to a FASTA path and optional aliases. Add or override entries in a Nextflow configuration file rather than on the command line. |
-| `params.containers` | Map | `${projectDir}/containers/*.sif` | Configuration | Maps the `python`, `fastp`, `align`, `cleavage`, and `multiqc` process groups to container images. Every entry is required. |
-| `params.container_bind_paths` | List | `[]` | Configuration | Host paths bound into Apptainer containers. The Longleaf profile sets `/proj`, `/work`, `/users`, `/overflow`, and `/nas`. |
-| `--index_lock_timeout_seconds` | Integer seconds | `172800` | No | Maximum time to wait for another process that is building the same bwa-mem2 index. The default is 48 hours. |
-| `--index_stale_lock_seconds` | Integer seconds | `172800` | No | Age at which an abandoned index-build lock becomes eligible for recovery. The default is 48 hours. |
+| `--input` | Path | `null` | Yes | Input samplesheet CSV with columns sample, fastq_1, fastq_2, and optional control and variant_vcf. See README.md for validation rules. |
+| `--genome` | String | `null` | Yes | Key of params.genomes to align against (for example GRCh38). |
+| `--analysis` | Choice | `digenome` | No | Calling mode: `digenome` pairs forward and reverse endpoints into DSBs; `ndigenome` calls isolated strand endpoints (SSBs, nicks). One mode applies to the complete run. |
+| `--outdir` | Path | `results` | No | Published results directory. Use a separate one for each run. |
+| `--genome_blacklist` | Path | `null` | No | Optional BED or BED.gz of regions to skip, with BAM contig names and 0-based half-open coordinates. |
+| `--ref_cache` | Path | `${projectDir}/reference_cache` | No | Shared bwa-mem2 index cache, keyed by genome, FASTA SHA-256, and bwa-mem2 version. |
+| `--publish_trimmed_fastqs` | Boolean | `false` | No | Also publish the fastp-trimmed FASTQs. |
 
-## Execution and publishing
+`params.genomes` maps genome names to a FASTA path. Add or override entries in
+a Nextflow configuration file rather than on the command line. Repository
+defaults are `GRCh38`, `GRCh37`, and `GRCm39`.
 
-| Parameter | Type | Default | Applies to | Description |
-| --- | --- | --- | --- | --- |
-| `--max_memory` | Memory | `3041.GB` | SLURM profiles | Executor-wide resource cap. Individual process requests remain defined in `conf/base.config`. |
-| `--max_cpus` | Integer | `256` | SLURM profiles | Executor-wide CPU cap, not the CPU request for an individual task. |
-| `--max_time` | Duration | `240.h` | SLURM profiles | Executor-wide wall-time cap. Individual process limits remain defined in `conf/base.config`. |
-| `--keep_multimappers` | Boolean | `false` | Both modes | Runs bwa-mem2 with `-a`, permits MAPQ 0 primary alignments, sets both caller minimum MAPQ values to 0, disables the support mean-MAPQ filter, and disables fastp low-complexity filtering. Secondary and supplementary alignments remain diagnostic only and are not counted as independent cleavage support. |
-| `--cleavage_chunks` | Integer | `8` | Both modes | Requested coordinate chunks per sample and maximum concurrent cleavage-caller tasks. Each caller uses one CPU. Work estimates exclude supplied blacklist bases, so masked spans do not consume chunk capacity. The planner can emit fewer nonempty chunks when the callable data cannot support the requested count. |
-| `--publish_concat_fastqs` | Boolean | `false` | Both modes | Copies lane-concatenated FASTQs to `<outdir>/concat_fastqs`. Concatenated files are always created in work storage for downstream processing. |
-| `--publish_trimmed_fastqs` | Boolean | `false` | Both modes | Copies fastp-trimmed FASTQs to `<outdir>/trimmed_fastqs`. Trimmed files are always created in work storage for alignment. |
+## Execution
 
-Chunk ownership is complete, gap-free, and nonoverlapping. Each chunk scans a
-padded region so nearby strand evidence is preserved, but each call has one
-owner. Final filtering and Benjamini-Hochberg q-values are calculated across
-the complete sample after all chunks are merged. Blacklisted spans remain in
-the ownership map for continuity, but contribute zero estimated callable work.
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--keep_multimappers` | Boolean | `false` | Run bwa-mem2 with `-a`, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement. |
+| `--cleavage_chunks` | Integer | `8` | Coordinate chunks per sample, each called by a one-CPU task. Changes runtime, never results. |
 
-## fastp preprocessing
+## Read trimming (fastp)
 
-| Parameter | Type | Default | Applies to | Description |
-| --- | --- | --- | --- | --- |
-| `--fastp_qualified_quality_phred` | Integer | `20` | Both modes | Minimum Phred score used by fastp to classify a base as qualified. |
-| `--fastp_length_required` | Integer bases | `30` | Both modes | Discards reads shorter than this length after trimming. |
-| `--fastp_low_complexity_filter` | Boolean | `true` | Digenome only | Enables fastp low-complexity filtering in Digenome mode. It is automatically disabled in nDigenome mode and whenever `--keep_multimappers` is enabled. |
-| `--fastp_complexity_threshold` | Integer percent | `30` | Digenome only | fastp complexity threshold used when low-complexity filtering is active. |
-| `--fastp_extra_args` | String | Empty | Both modes | Additional arguments appended to the fastp command. This is an advanced escape hatch; avoid duplicating options already controlled by dedicated parameters. |
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--fastp_qualified_quality_phred` | Integer | `20` | Minimum Phred score for a qualified base. |
+| `--fastp_length_required` | Integer | `30` | Discard reads shorter than this after trimming. |
+| `--fastp_low_complexity_filter` | Boolean | `true` | Low-complexity filtering in Digenome mode. Always off in nDigenome mode and with --keep_multimappers. |
+| `--fastp_complexity_threshold` | Integer | `30` | fastp complexity threshold (percent) when low-complexity filtering is on. |
+| `--fastp_extra_args` | String | Empty | Extra arguments appended to the fastp command. |
 
 Adapter detection is enabled for paired-end reads. Poly-G and poly-X trimming
 are enabled for both paired-end and single-end reads.
 
-## Digenome parameters
+## Digenome calling
 
 These parameters affect `--analysis digenome`. Forward and reverse endpoints
 are eligible to pair when:
@@ -82,20 +69,20 @@ abs(reverse_position - (forward_position - overhang)) <= pair_window
 The filtering score is:
 
 ```text
-forward_fraction * reverse_fraction
-* (forward_endpoint_count + reverse_endpoint_count) / 4
+digenome_pair_score = forward_fraction * reverse_fraction
+                    * (forward_endpoint_count + reverse_endpoint_count) / 4
 ```
 
-| Parameter | Type | Default | Pass condition | Description |
+| Parameter | Type | Default | Comparison | Description |
 | --- | --- | --- | --- | --- |
-| `--digenome_overhang` | Signed integer bases | `0` | Coordinate adjustment | Expected forward-minus-reverse endpoint offset. A positive value places the expected reverse endpoint at `forward - overhang`. |
-| `--digenome_pair_window` | Nonnegative integer bases | `2` | Within `+/-` window | Positional tolerance around the expected reverse endpoint. For example, overhang `4` and window `2` accept forward-minus-reverse offsets from 2 through 6 bases. |
-| `--digenome_min_mapq` | Integer | `1` | Alignment MAPQ `>=` value | Minimum MAPQ for primary alignments contributing to Digenome candidates and metrics. Automatically becomes `0` with `--keep_multimappers`. |
-| `--digenome_forward_cutoff` | Integer count | `5` | Forward count `>` value | A cutoff of 5 requires at least 6 forward endpoint reads. |
-| `--digenome_reverse_cutoff` | Integer count | `5` | Reverse count `>` value | A cutoff of 5 requires at least 6 reverse endpoint reads. |
-| `--digenome_depth_cutoff` | Integer count | `10` | Each strand depth `>` value | Both forward and reverse local strand depths must exceed this cutoff. |
-| `--digenome_fraction_cutoff` | Fraction | `0.20` | Each endpoint fraction `>` value | Both strand-specific endpoint fractions must exceed this cutoff. |
-| `--digenome_pair_score_cutoff` | Number | `2.5` | Pair score `>` value | Minimum `digenome_pair_score`. |
+| `--digenome_overhang` | Integer | `0` | Coordinate adjustment | Expected forward-minus-reverse endpoint offset; the expected reverse endpoint is forward - overhang. |
+| `--digenome_pair_window` | Integer | `2` | Within `+/-` window | A forward and reverse endpoint can pair when `\|reverse - (forward - overhang)\| <= this`. |
+| `--digenome_min_mapq` | Integer | `1` | Alignment MAPQ `>=` value | Minimum MAPQ (>=) of counted alignments. 0 with --keep_multimappers. |
+| `--digenome_forward_cutoff` | Integer | `5` | Forward count `>` value | Forward endpoint count must be > this. |
+| `--digenome_reverse_cutoff` | Integer | `5` | Reverse count `>` value | Reverse endpoint count must be > this. |
+| `--digenome_depth_cutoff` | Integer | `10` | Each strand depth `>` value | Each strand's depth must be > this. |
+| `--digenome_fraction_cutoff` | Number | `0.2` | Each endpoint fraction `>` value | Each strand's endpoint fraction must be > this. |
+| `--digenome_pair_score_cutoff` | Number | `2.5` | Pair score `>` value | digenome_pair_score must be > this. Not comparable with RGEN score cutoffs. |
 
 Candidate pairs are selected with deterministic one-to-one matching. Pairs
 that fail caller thresholds remain in the complete audit TSV with their
@@ -112,18 +99,18 @@ The call TSV reports two Digenome scores:
 Matched-control rows report the independently measured
 `control_digenome_pair_score` and `control_rgen_digenome_score`.
 
-## nDigenome parameters
+## nDigenome calling
 
 These parameters affect `--analysis ndigenome`.
 
 | Parameter | Type | Default | Comparison | Description |
 | --- | --- | --- | --- | --- |
-| `--ndigenome_min_count` | Integer count | `10` | Focal count `>=` value | Minimum number of same-strand reads ending at the focal coordinate. |
-| `--ndigenome_min_fraction` | Fraction | `0.20` | Focal fraction `>=` value | Minimum fraction of local same-strand depth ending at the focal coordinate. |
-| `--ndigenome_min_mapq` | Integer | `1` | Alignment MAPQ `>=` value | Minimum MAPQ for primary alignments contributing to nDigenome candidates and metrics. Automatically becomes `0` with `--keep_multimappers`. |
-| `--ndigenome_opposite_window` | Nonnegative integer bases | `5` | `+/-` window | Searches for opposite-strand endpoints within this distance of the focal endpoint. |
-| `--ndigenome_ambiguous_min_count` | Nonnegative integer count | `3` | Opposite count `>=` value | Weak opposite-strand count threshold. Meeting this threshold alone is enough to classify the row as `AMBIGUOUS` when it is not already `POSSIBLE_DSB`. |
-| `--ndigenome_ambiguous_min_fraction` | Fraction | `0.05` | Opposite fraction `>=` value | Weak opposite-strand fraction threshold. Meeting this threshold alone is enough to classify the row as `AMBIGUOUS` when it is not already `POSSIBLE_DSB`. |
+| `--ndigenome_min_count` | Integer | `10` | Focal count `>=` value | Focal endpoint count must be >= this. An opposite endpoint reaching this and the minimum fraction makes the call POSSIBLE_DSB. |
+| `--ndigenome_min_fraction` | Number | `0.2` | Focal fraction `>=` value | Focal endpoint fraction of same-strand depth must be >= this. |
+| `--ndigenome_min_mapq` | Integer | `1` | Alignment MAPQ `>=` value | Minimum MAPQ (>=) of counted alignments. 0 with --keep_multimappers. |
+| `--ndigenome_opposite_window` | Integer | `5` | `+/-` window | Search this many bases on each side for opposite-strand endpoints. |
+| `--ndigenome_ambiguous_min_count` | Integer | `3` | Opposite count `>=` value | An opposite endpoint with count >= this makes the call AMBIGUOUS. |
+| `--ndigenome_ambiguous_min_fraction` | Number | `0.05` | Opposite fraction `>=` value | An opposite endpoint with fraction >= this makes the call AMBIGUOUS. |
 
 Opposite-strand classification uses:
 
@@ -147,14 +134,14 @@ Only unfiltered `SSB` rows enter the high-confidence nDigenome output.
 
 | Parameter | Type | Default | Filter condition | Description |
 | --- | --- | --- | --- | --- |
-| `--cleavage_artifact_window` | Nonnegative integer bases | `10` | Measurement window | Radius around each endpoint used for local MAPQ, mismatch, indel, and soft-clipping measurements. It also contributes to automatic chunk padding. |
-| `--cleavage_max_softclip_fraction` | Fraction | `0.20` | Soft-clipped fraction `>=` value | Adds `HIGH_5P_SOFTCLIP` when this fraction of supporting endpoint reads has a 5-prime soft clip. |
-| `--cleavage_max_indel_fraction` | Fraction | `0.20` | Local indel fraction `>=` value | Adds `NEARBY_INDEL` when the fraction of local primary alignments with a nearby CIGAR indel reaches this value. |
-| `--cleavage_min_support_mean_mapq` | Number | `10` | Mean MAPQ `<` value | Adds `LOW_SUPPORT_MAPQ` when the mean MAPQ of supporting endpoint reads is below this value. Automatically becomes `0` with `--keep_multimappers`. |
-| `--cleavage_control_min_depth` | Integer count | `1` | Control depth `<` value | Adds `INSUFFICIENT_CONTROL_COVERAGE` when matched-control strand depth is below this value. It has no effect when no matched control is supplied. |
-| `--cleavage_control_max_fraction` | Fraction | `0.05` | Control fraction `>` value | Adds `HIGH_CONTROL_FRACTION`. Equality passes. |
-| `--cleavage_control_min_fold` | Number | `5.0` | Fold enrichment `<` value | Adds `LOW_CONTROL_FOLD` when the pseudocount-adjusted treated endpoint rate is not sufficiently enriched over control. Equality passes. |
-| `--cleavage_control_max_q` | Fraction | `0.05` | Fisher q-value `>` value | Adds `CONTROL_Q_FAIL` when the sample-wide Benjamini-Hochberg-adjusted matched-control Fisher value exceeds this threshold. Equality passes. |
+| `--cleavage_artifact_window` | Integer | `10` | Measurement window | Bases on each side of an endpoint used for MAPQ, mismatch, indel, clipping, and known-indel checks. |
+| `--cleavage_max_softclip_fraction` | Number | `0.2` | Soft-clipped fraction `>=` value | HIGH_5P_SOFTCLIP when the 5' soft-clipped fraction of supporting reads is >= this. |
+| `--cleavage_max_indel_fraction` | Number | `0.2` | Local indel fraction `>=` value | NEARBY_INDEL when the fraction of local alignments with a nearby indel is >= this. |
+| `--cleavage_min_support_mean_mapq` | Number | `10` | Mean MAPQ `<` value | LOW_SUPPORT_MAPQ when supporting reads' mean MAPQ is < this. 0 with --keep_multimappers. |
+| `--cleavage_control_min_depth` | Integer | `1` | Control depth `<` value | INSUFFICIENT_CONTROL_COVERAGE when the control depth is < this. |
+| `--cleavage_control_max_fraction` | Number | `0.05` | Control fraction `>` value | HIGH_CONTROL_FRACTION when the control endpoint fraction is > this. Equality passes. |
+| `--cleavage_control_min_fold` | Number | `5.0` | Fold enrichment `<` value | LOW_CONTROL_FOLD when the treated/control fold enrichment is < this. Equality passes. |
+| `--cleavage_control_max_q` | Number | `0.05` | Fisher q-value `>` value | CONTROL_Q_FAIL when the sample-wide Benjamini-Hochberg q-value is > this. Equality passes. |
 
 For matched controls, each failed condition is reported independently:
 
@@ -180,6 +167,22 @@ fold = treated_rate / control_rate
 The Fisher exact test itself uses the raw endpoint and non-endpoint counts.
 Q-values are calculated after merging every chunk so multiple-testing
 correction remains sample-wide.
+
+## Removed in the 2026 rebuild
+
+These parameters were used in the previous pipeline and are no longer available.
+Resource limits, container image paths, and index cache timeouts are now
+configured through configuration files instead of pipeline parameters:
+
+- `max_memory`: use `resourceLimits` in a configuration file
+- `max_cpus`: use `resourceLimits` in a configuration file
+- `max_time`: use `resourceLimits` in a configuration file
+- `containers`: set process container paths in `conf/base.config` or a custom config
+- `container_bind_paths`: the `longleaf` profile binds required paths; customize in a config
+- `index_lock_timeout_seconds`: fixed at 48 hours in `bin/prepare_bwamem2_index.sh`
+- `index_stale_lock_seconds`: fixed at 48 hours in `bin/prepare_bwamem2_index.sh`
+- `publish_concat_fastqs`: lane concatenation happens inside the FASTP process
+- genome aliases: use the canonical genome name (e.g., `GRCh38` instead of `hg38`)
 
 ## Nextflow runtime options
 
@@ -207,7 +210,7 @@ nextflow run /path/to/digenome-seq_pipeline \
   -profile longleaf \
   -resume \
   --input samplesheet.csv \
-  --genome hg38 \
+  --genome GRCh38 \
   --analysis ndigenome \
   --keep_multimappers \
   --genome_blacklist /path/to/genome_blacklist.bed.gz \
@@ -222,7 +225,7 @@ Digenome run expecting a four-base endpoint offset with two-base tolerance:
 nextflow run /path/to/digenome-seq_pipeline \
   -profile longleaf \
   --input samplesheet.csv \
-  --genome hg38 \
+  --genome GRCh38 \
   --analysis digenome \
   --digenome_overhang 4 \
   --digenome_pair_window 2 \

@@ -22,7 +22,7 @@ copied or provisioned there before running the pipeline.
 | --- | --- |
 | `fastp_v1.3.3.sif` | read trimming |
 | `bwa-mem2_v2.3_samtools_v1.22.sif` | alignment and BAM processing |
-| `multiqc_v1.35.sif` | samplesheet validation and MultiQC |
+| `multiqc_v1.35.sif` | MultiQC report generation |
 | `cleavage_pysam_v0.23.3.sif` | unified Digenome/nDigenome caller |
 
 ## Cleavage image

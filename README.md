@@ -12,30 +12,30 @@ Both modes use the same alignment and cleavage-calling engine. They share
 matched controls, known-indel annotation, artifact filters, parallel cleavage
 calling, QC, and output formats.
 
-## Longleaf requirements
+## Requirements
 
-The `longleaf` profile expects:
+- Nextflow >= 25.04 (Longleaf has 25.04.7)
+- Java 17+
+- SLURM and Apptainer on Longleaf only
 
-- Nextflow
-- Java
-- SLURM
-- globally installed Apptainer
-- access to the configured reference FASTA and cache directories
+The pipeline downloads the nf-schema plugin (pinned 2.5.1) on first run into
+`~/.nextflow/plugins`, so the launching node needs internet once.
 
-The containers provide Python, pysam, bwa-mem2, samtools, fastp, and MultiQC.
-No Python module or virtual environment is required.
+Container images provide Python 3.12, pysam 0.23.3, bwa-mem2, samtools, fastp,
+and MultiQC. No Python module or virtual environment is required on the host.
 
-The GitHub repository does not include the large SIF files. A complete
-Longleaf installation keeps the validated images under its own checkout:
+## Installation and verification
+
+SIF files are excluded from Git because of their size. Each complete installation
+stores the validated images in:
 
 ```text
 <pipeline-directory>/containers
 ```
 
-The pipeline looks for images in the `containers/` directory of the checkout
-being run. Therefore, runs using the shared Longleaf checkout find these
-images automatically. A separate checkout must have the same SIF files copied
-or provisioned in its own `containers/` directory.
+Nextflow expects the files in the `containers/` directory of whichever pipeline
+checkout is being run. A separate checkout must have these images copied or
+provisioned there before running the pipeline.
 
 Verify the required commands and the default GRCh38 reference:
 
@@ -51,8 +51,7 @@ cd /path/to/digenome-seq_pipeline/containers
 sha256sum -c checksums.sha256
 ```
 
-Build the unified cleavage image only when it is missing or intentionally
-being replaced:
+Build the cleavage image only when it is missing or intentionally being replaced:
 
 ```bash
 cd /path/to/digenome-seq_pipeline
@@ -67,7 +66,7 @@ Run Digenome-seq:
 nextflow run /path/to/digenome-seq_pipeline \
   -profile longleaf \
   --input samplesheet.csv \
-  --genome hg38 \
+  --genome GRCh38 \
   --analysis digenome \
   --outdir results_digenome \
   -work-dir /work/groups/barc_scr/my_project/digenome
@@ -79,7 +78,7 @@ Run nDigenome-seq with repetitive-region support and 16 cleavage callers:
 nextflow run /path/to/digenome-seq_pipeline \
   -profile longleaf \
   --input samplesheet.csv \
-  --genome hg38 \
+  --genome GRCh38 \
   --analysis ndigenome \
   --keep_multimappers \
   --cleavage_chunks 16 \
@@ -129,7 +128,6 @@ Columns:
 | `fastq_2` | Yes | R2 FASTQ; leave blank only for single-end Digenome data |
 | `control` | No | Name of the matched control sample |
 | `variant_vcf` | No | Indexed `.vcf.gz` containing known variants |
-| `lane` | No | Optional row identifier; generated internally when omitted |
 
 Important rules:
 
@@ -143,25 +141,26 @@ Important rules:
 - unknown or misspelled columns are rejected
 - FASTQs must end in `.fastq.gz` or `.fq.gz`
 - nDigenome requires paired-end reads
+- sample and control names use letters, digits, `.`, `_`, `-`
 
 The template is at `assets/samplesheet_template.csv`.
 
-## Common options
+## Configuration and parameters
 
-The complete lookup for all pipeline parameters, defaults, comparison
-semantics, interactions, and examples is
-[docs/parameters.md](docs/parameters.md).
+For a complete lookup of all parameters, defaults, comparison semantics,
+interactions, and examples, see [docs/parameters.md](docs/parameters.md).
+
+Common runtime options:
 
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--analysis` | `digenome` | Select DSB or SSB calling |
-| `--genome` | Required | Configured genome name or alias |
+| `--genome` | Required | Configured genome name (e.g., `GRCh38`) |
 | `--outdir` | `results` | Published results directory |
 | `-work-dir` | Nextflow default | Temporary Nextflow work directory |
 | `--keep_multimappers` | Off | Retain MAPQ 0 primary alignments for repetitive regions |
-| `--cleavage_chunks` | `8` | Maximum number of parallel one-CPU cleavage callers |
+| `--cleavage_chunks` | `8` | Coordinate chunks per sample, maximum concurrent one-CPU tasks |
 | `--genome_blacklist` | Unset | BED/BED.gz regions excluded before cleavage scanning |
-| `--publish_concat_fastqs` | Off | Publish combined FASTQs |
 | `--publish_trimmed_fastqs` | Off | Publish fastp output FASTQs |
 
 Use `--cleavage_chunks 1` for serial cleavage calling. Increasing the value
@@ -171,6 +170,41 @@ intervals, so increasing the value can shorten a job that would otherwise
 contain one whole chromosome. The planner may create fewer chunks only when
 the mapped data and coordinate resolution cannot produce that many nonempty
 ownership ranges.
+
+Nextflow runtime options (one leading hyphen):
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `-profile` | None | Selects execution configuration: `standard`, `slurm`, `apptainer`, `longleaf` |
+| `-resume` | Off | Reuses compatible cached tasks from the selected work directory |
+| `-work-dir` | `work` | Nextflow task work directory; use stable, separate locations |
+| `-c` | None | Adds a Nextflow configuration file (custom genomes, containers, resources) |
+
+## Genomes
+
+Configured genome names:
+
+| Genome | Reference |
+| --- | --- |
+| `GRCh38` | `/proj/seq/data/GRCh38_GENCODE/GRCh38.primary_assembly.genome.fa` |
+| `GRCh37` | `/proj/seq/data/HG19_UCSC/Sequence/WholeGenomeFasta/genome.fa` |
+| `GRCm39` | `/proj/seq/data/GRCm39_GENCODE/Sequence/WholeGenomeFasta/GRCm39.primary_assembly.genome.fa` |
+
+To use a different genome, add it in a custom configuration file:
+
+```bash
+nextflow run . -c my.config --genome MyGenome
+```
+
+where `my.config` contains:
+
+```groovy
+params {
+    genomes {
+        MyGenome = [fasta: '/path/to/genome.fa']
+    }
+}
+```
 
 ## Genome blacklist
 
@@ -197,7 +231,7 @@ The sample QC JSON records the staged filename, SHA-256 checksum, merged
 interval count, and excluded-base count. Final filters and q-values remain
 sample-wide over candidates from the callable, nonblacklisted genome.
 
-Available profiles:
+## Execution profiles
 
 | Profile | Use |
 | --- | --- |
@@ -205,6 +239,9 @@ Available profiles:
 | `slurm` | Generic SLURM execution |
 | `apptainer` | Local execution with Apptainer |
 | `standard` | Local configuration without a container engine |
+
+Combine profiles with commas and the `test` profile last, e.g. `-profile apptainer,test` or
+`-profile longleaf,test`.
 
 ## Multimappers
 
@@ -244,7 +281,7 @@ The optional VCF must:
 A mismatch such as `chr1` versus `1` stops the run rather than silently
 disabling known-indel annotation.
 
-## Calls and filters
+## Calling, filtering, and output
 
 Digenome mode pairs nearby forward and reverse 5-prime endpoint pileups.
 nDigenome mode evaluates each strand independently and rejects meaningful
@@ -255,53 +292,18 @@ filtering, plus `rgen_digenome_score`, which reproduces the standalone CRISPR
 RGEN Tools v1.0 score for comparison with historical results. Matched controls
 receive both scores independently.
 
-Output rows use:
+Output tiers:
 
 - `PASS`: retained in `*.high_confidence.tsv` and BED
 - filtered rows with shared artifact evidence: retained in `*.artifact.tsv`
 - other filtered rows: retained in `*.manual_review.tsv` for user review
 - every row: retained in the complete `*.all.tsv` audit output
 
-Shared filters consider:
+For the complete equations, exact comparisons, matching behavior, and all filter
+reasons, see [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md).
 
-- supporting-read MAPQ
-- 5-prime soft clipping
-- nearby CIGAR indels
-- overlap with the optional known-indel VCF
-- matched-control enrichment and statistical support
-- sufficient local control coverage
+## Reference cache
 
-All calling and filtering thresholds are configurable. For example:
-
-```bash
---ndigenome_min_count 8 \
---ndigenome_min_fraction 0.15 \
---cleavage_control_min_depth 10
-```
-
-The Digenome count, depth, fraction, and numeric score defaults are informed
-by the [original Digenome distribution](http://www.rgenome.net/static/digenome-js/digenome).
-The pair and RGEN scores are distinct formulas, so their values and cutoffs
-are not interchangeable. The nDigenome focal defaults of at least 10 endpoint
-reads and at least 20% local fraction come from
-[Kim et al. 2020](https://doi.org/10.1093/nar/gkaa764). Other artifact and
-control settings are pipeline defaults that should be calibrated with
-positive and negative controls.
-
-See [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md) for equations,
-exact comparisons, matching behavior, and all filter reasons.
-
-## Reference genomes and cache
-
-Configured names and aliases:
-
-| Genome | Aliases |
-| --- | --- |
-| `GRCh38` | `hg38`, `human_hg38` |
-| `GRCh37` | `hg19`, `human_hg19` |
-| `GRCm39` | `mm39`, `mouse_mm39` |
-
-The source FASTA remains at the path configured in `nextflow.config`.
 bwa-mem2 indexes are stored under:
 
 ```text
@@ -364,18 +366,17 @@ Shared outputs:
 ├── fastp/
 ├── qc/
 ├── multiqc/
+├── trimmed_fastqs/ (only with --publish_trimmed_fastqs)
 └── pipeline_info/
 ```
 
-`pipeline_info/preflight.ready.json` records schema validation success and
-any path-access warnings before samplesheet validation or index preparation
-can run. `pipeline_info/analysis_parameters.json` records the resolved mode,
-thresholds, reference, containers, multimapper policy, and chunk settings.
-The cleavage chunk plan is stored under `pipeline_info/cleavage_chunks/`. It
-reports each chunk's owned genomic intervals, callable and excluded bases,
-and estimated total and callable mapped records.
+`pipeline_info/analysis_parameters.json` records the resolved mode, thresholds,
+reference, containers, multimapper policy, and chunk settings. The cleavage
+chunk plan is stored under `pipeline_info/cleavage_chunks/`. It reports each
+chunk's owned genomic intervals, callable and excluded bases, and estimated
+total and callable mapped records.
 
-## Testing and production validation
+## Testing
 
 Run the local test suite:
 
@@ -384,9 +385,10 @@ python3 -m pip install -r requirements-test.txt
 ./tests/run_tests.sh
 ```
 
-The synthetic suite covers workflow contracts, samplesheets, endpoint
-coordinates, DSB pairing, SSB classification, controls, variants, artifacts,
-chunks, and reference caching.
+The suite uses Python `unittest` and synthetic indexed BAMs generated with
+pysam. It covers workflow contracts, samplesheets, endpoint coordinates, DSB
+pairing, SSB classification, controls, variants, artifacts, chunks, and
+reference caching.
 
 Before production use, run both modes through the Longleaf smoke test and
 validate with known-positive material, untreated controls, and representative

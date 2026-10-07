@@ -10,15 +10,15 @@ python3 -m pip install -r requirements-test.txt
 ```
 
 The suite uses Python `unittest` and synthetic indexed BAMs generated with
-pysam. It does not require production FASTQs or references.
+pysam. It does not require production FASTQs or references. When Nextflow is
+installed, it also runs `nextflow lint` on `main.nf` and stub runs of both
+calling modes.
 
 Coverage includes:
 
-- original and extended samplesheets
-- unknown columns, repeated FASTQs, and identical R1/R2 rejection
-- paired-end enforcement
-- metadata and control validation
-- staged-basename collision detection
+- samplesheet validation (columns, duplicates, R1/R2, paired-end enforcement)
+- sample and control names (character restrictions, control row validation)
+- metadata and control consistency
 - forward/reverse and complex-CIGAR endpoint coordinates
 - duplicate, secondary, supplementary, and MAPQ filtering
 - Digenome DSB pairing, overhangs, scores, and one-strand rejection
@@ -29,17 +29,16 @@ Coverage includes:
 - detailed matched-control filter reasons and candidate output tiers
 - VCF contig compatibility and insufficient-control-coverage handling
 - complete, gap-free, nonoverlapping chunk interval validation
-- chromosome-split boundary padding and single-owner call emission
 - blacklist-adjusted callable-work balancing, including fully masked contigs
 - optional BED/BED.gz blacklist parsing, validation, provenance, and scanning
 - Fisher exact and Benjamini-Hochberg calculations
-- parameter schema coverage and preflight path/configuration validation
+- parameter schema compliance
 - complete index reuse
 - FASTA fingerprint changes
 - partial index quarantine
 - stale local lock recovery
 - shared cache and lock permissions under a restrictive user umask
-- static workflow/container contracts
+- static workflow and container contracts
 
 ## Smoke test
 
@@ -78,15 +77,13 @@ nextflow run . \
   -work-dir smoke_work_dsb
 ```
 
-The fixture contains unique paired fragments with:
-
-- 11 forward and 11 reverse endpoints at a synthetic DSB
-- 11 forward-only endpoints at a synthetic SSB
-
-After Digenome smoke completion, `Tiny.digenome.all.tsv` should contain at
-least one data row. After nDigenome smoke completion, the audit output should
-contain the paired-strand evidence plus a passing SSB. The fixture validates
-orchestration and basic caller integration, not biological sensitivity.
+The fixture has a DSB at 250 and an SSB at 300, each with 11 forward and 11 reverse
+endpoints (or 11 forward-only for the SSB). After Digenome smoke completion,
+`Tiny.digenome.all.tsv` should contain at least one data row for the paired
+endpoints. After nDigenome smoke completion, the audit output should contain
+evidence of the DSB (as `POSSIBLE_DSB` or `AMBIGUOUS` rows) and a passing `SSB`
+row at 300. The fixture validates orchestration and basic caller integration,
+not biological sensitivity.
 
 ## Longleaf validation
 
@@ -108,15 +105,15 @@ Repeat with `--analysis digenome`, a separate output directory, and a separate
 work directory. The smoke configuration reduces resources only for the tiny
 fixture; production runs retain `conf/base.config` resources.
 
-The following cannot be proven by local unit tests:
+The following cannot be proven by local tests:
 
 - SLURM submission and accounting
-- visibility and writability of `/proj` paths
-- site mount behavior
+- Longleaf paths and mounts (`/proj`, `/work`, `/users`, `/overflow`, `/nas`)
 - production SIF execution
-- unified caller runtime on full-depth human WGS
-- sensitivity and specificity on known-positive biological material
+- full-depth runtime on human whole-genome sequencing
+- biological sensitivity and specificity
 
-Run both smoke modes, then known-positive and negative controls before
-production use. Include a repetitive-region truth set when validating
-`--keep_multimappers`.
+Run both smoke modes on Longleaf, then validate with known-positive material,
+untreated controls, and representative library preparations. Include a
+repetitive-region truth set when validating `--keep_multimappers`. See
+`tests/benchmark/README.md` for the Longleaf benchmark kit.
