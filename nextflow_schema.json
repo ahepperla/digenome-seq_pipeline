@@ -68,7 +68,7 @@
         "long_reads": {
           "type": "boolean",
           "default": false,
-          "description": "Call long-read (ONT/PacBio) samples from aligned BAMs given in the samplesheet's bam column, skipping trimming and alignment. Both aligned ends of each read count, and the soft-clip and indel limits become 1.0."
+          "description": "Call long-read (ONT/PacBio) samples from aligned BAMs given in the samplesheet's bam column, skipping trimming and alignment; BAMs that aren't coordinate-sorted and indexed are sorted first. Both aligned ends of each read count, and the soft-clip and indel limits become 1.0."
         },
         "cleavage_chunks": {
           "type": "integer",

@@ -158,8 +158,9 @@ Blacklisted and off-contig positions contribute nothing.
 
 ## Long reads
 
-With `--long_reads`, each sample is one aligned, coordinate-sorted, indexed
-BAM (ONT or PacBio), called as given: no trimming, alignment, or `--genome`.
+With `--long_reads`, each sample is one aligned BAM (ONT or PacBio): no
+trimming, alignment, or `--genome`. A BAM that isn't coordinate-sorted with an
+index beside it is sorted and indexed first.
 A long read spans a whole molecule, so both of its aligned ends are molecule
 ends, and both count. The read filters and thresholds are the same, apart
 from the artifact limits below.

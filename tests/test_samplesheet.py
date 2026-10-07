@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pysam
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bin"))
 
@@ -19,6 +21,18 @@ class SamplesheetTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    def bam(self, name: str, sort_order: str = "coordinate", index: str | None = ".bai", aligned: bool = True) -> Path:
+        """A header-only BAM, with an empty index file beside it unless `index` is None."""
+        path = self.tmp / name
+        header = {"HD": {"VN": "1.6", "SO": sort_order}}
+        if aligned:
+            header["SQ"] = [{"SN": "chr1", "LN": 1000}]
+        with pysam.AlignmentFile(str(path), "wb", header=header):
+            pass
+        if index:
+            Path(f"{path}{index}").touch()
+        return path
 
     def fastq(self, name: str, directory: Path | None = None) -> Path:
         target_dir = directory or self.tmp
@@ -390,12 +404,8 @@ class SamplesheetTests(unittest.TestCase):
 
     def test_valid_long_read_sheet_with_treated_and_control(self) -> None:
         """Test valid long-read sheet with treated sample and control."""
-        treated_bam = self.tmp / "treated.bam"
-        treated_bam.touch()
-        Path(f"{treated_bam}.bai").touch()
-        control_bam = self.tmp / "control.bam"
-        control_bam.touch()
-        Path(f"{control_bam}.bai").touch()
+        treated_bam = self.bam("treated.bam")
+        control_bam = self.bam("control.bam")
         vcf = self.tmp / "donor.vcf.gz"
         vcf.touch()
         Path(f"{vcf}.tbi").touch()
@@ -433,9 +443,7 @@ class SamplesheetTests(unittest.TestCase):
 
     def test_long_read_sheet_with_csi_index(self) -> None:
         """Test that .csi index is accepted for long-read BAM."""
-        bam = self.tmp / "sample.bam"
-        bam.touch()
-        Path(f"{bam}.csi").touch()
+        bam = self.bam("sample.bam", index=".csi")
 
         input_csv = self.tmp / "input.csv"
         input_csv.write_text(
@@ -445,18 +453,28 @@ class SamplesheetTests(unittest.TestCase):
         records = validate_samplesheet(input_csv, "digenome", long_reads=True)
         self.assertEqual([record["bam_index"] for record in records], [f"{bam.resolve()}.csi"])
 
-    def test_long_read_missing_bam_index_rejected(self) -> None:
-        """Test that BAM without .bai or .csi index is rejected."""
-        bam = self.tmp / "sample.bam"
-        bam.touch()
+    def long_read_index(self, bam: Path) -> str:
+        sheet = self.tmp / "input.csv"
+        sheet.write_text(f"sample,bam\nSample,{bam}\n")
+        return validate_samplesheet(sheet, "digenome", long_reads=True)[0]["bam_index"]
 
-        input_csv = self.tmp / "input.csv"
-        input_csv.write_text(
-            "sample,bam\n"
-            f"Sample,{bam}\n"
-        )
-        with self.assertRaisesRegex(ValueError, "not indexed with .bai or .csi"):
-            validate_samplesheet(input_csv, "digenome", long_reads=True)
+    def test_long_read_bam_without_index_is_left_for_sorting(self) -> None:
+        self.assertEqual(self.long_read_index(self.bam("sample.bam", index=None)), "")
+
+    def test_long_read_unsorted_bam_is_left_for_sorting_despite_an_index(self) -> None:
+        for sort_order in ("unsorted", "queryname", "unknown"):
+            with self.subTest(sort_order=sort_order):
+                self.assertEqual(self.long_read_index(self.bam(f"{sort_order}.bam", sort_order)), "")
+
+    def test_long_read_unaligned_bam_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "has no reference sequences, so it is not aligned"):
+            self.long_read_index(self.bam("unaligned.bam", "unsorted", index=None, aligned=False))
+
+    def test_long_read_unreadable_bam_rejected(self) -> None:
+        bam = self.tmp / "empty.bam"
+        bam.touch()
+        with self.assertRaisesRegex(ValueError, "could not be read as a BAM file"):
+            self.long_read_index(bam)
 
     def test_long_read_non_bam_suffix_rejected(self) -> None:
         """Test that non-.bam path is rejected."""
@@ -493,9 +511,7 @@ class SamplesheetTests(unittest.TestCase):
 
     def test_long_read_bam_reuse_rejected(self) -> None:
         """Test that the same BAM on two rows is rejected."""
-        bam = self.tmp / "shared.bam"
-        bam.touch()
-        Path(f"{bam}.bai").touch()
+        bam = self.bam("shared.bam")
 
         input_csv = self.tmp / "input.csv"
         input_csv.write_text(
@@ -508,12 +524,8 @@ class SamplesheetTests(unittest.TestCase):
 
     def test_long_read_one_sample_one_row_enforced(self) -> None:
         """Test that one sample can have only one row in long-read mode."""
-        bam1 = self.tmp / "sample1.bam"
-        bam1.touch()
-        Path(f"{bam1}.bai").touch()
-        bam2 = self.tmp / "sample2.bam"
-        bam2.touch()
-        Path(f"{bam2}.bai").touch()
+        bam1 = self.bam("sample1.bam")
+        bam2 = self.bam("sample2.bam")
 
         input_csv = self.tmp / "input.csv"
         input_csv.write_text(
@@ -539,9 +551,7 @@ class SamplesheetTests(unittest.TestCase):
 
     def test_short_read_rejects_bam_column_without_long_reads(self) -> None:
         """Test that bam column is rejected without --long_reads."""
-        bam = self.tmp / "sample.bam"
-        bam.touch()
-        Path(f"{bam}.bai").touch()
+        bam = self.bam("sample.bam")
 
         input_csv = self.tmp / "input.csv"
         input_csv.write_text(
@@ -553,15 +563,9 @@ class SamplesheetTests(unittest.TestCase):
 
     def test_long_read_shared_control_allowed(self) -> None:
         """Test that one control can be shared by multiple treated samples."""
-        treated1_bam = self.tmp / "treated1.bam"
-        treated1_bam.touch()
-        Path(f"{treated1_bam}.bai").touch()
-        treated2_bam = self.tmp / "treated2.bam"
-        treated2_bam.touch()
-        Path(f"{treated2_bam}.bai").touch()
-        control_bam = self.tmp / "control.bam"
-        control_bam.touch()
-        Path(f"{control_bam}.bai").touch()
+        treated1_bam = self.bam("treated1.bam")
+        treated2_bam = self.bam("treated2.bam")
+        control_bam = self.bam("control.bam")
 
         input_csv = self.tmp / "input.csv"
         input_csv.write_text(
@@ -580,15 +584,9 @@ class SamplesheetTests(unittest.TestCase):
 
     def test_long_read_control_chain_rejected(self) -> None:
         """Test that control chains are rejected in long-read mode."""
-        treated_bam = self.tmp / "treated.bam"
-        treated_bam.touch()
-        Path(f"{treated_bam}.bai").touch()
-        control_a_bam = self.tmp / "control_a.bam"
-        control_a_bam.touch()
-        Path(f"{control_a_bam}.bai").touch()
-        control_b_bam = self.tmp / "control_b.bam"
-        control_b_bam.touch()
-        Path(f"{control_b_bam}.bai").touch()
+        treated_bam = self.bam("treated.bam")
+        control_a_bam = self.bam("control_a.bam")
+        control_b_bam = self.bam("control_b.bam")
 
         input_csv = self.tmp / "input.csv"
         input_csv.write_text(
@@ -602,9 +600,7 @@ class SamplesheetTests(unittest.TestCase):
 
     def test_long_read_ndigenome_allowed(self) -> None:
         """Test that ndigenome analysis is allowed with long reads."""
-        bam = self.tmp / "sample.bam"
-        bam.touch()
-        Path(f"{bam}.bai").touch()
+        bam = self.bam("sample.bam")
 
         input_csv = self.tmp / "input.csv"
         input_csv.write_text(

@@ -23,6 +23,8 @@ from collections import Counter
 from dataclasses import fields
 from pathlib import Path
 
+import pysam
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests" / "fixtures"))
 sys.path.insert(0, str(ROOT / "bin"))
@@ -177,6 +179,8 @@ class NextflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("had errors", result.stdout)
 
+    INPUT_MTIME = 1_000_000_000  # set on input BAMs, to show the run never writes them
+
     SHORT_READ_PROCESSES = {
         "SAMPLESHEET", "SHORT_READS:PREPARE_INDEX", "SHORT_READS:FASTP", "SHORT_READS:ALIGN",
         "CALL_CHUNK", "FINALIZE", "MULTIQC",
@@ -221,7 +225,15 @@ class NextflowTests(unittest.TestCase):
             self.published(out),
             {path for path in self.expected_files("ndigenome", samples, called) if not path.startswith(aligned_outputs)},
         )
-        self.assertEqual(self.processes(out), {"SAMPLESHEET", "CALL_CHUNK", "FINALIZE", "MULTIQC"})
+        self.assertEqual(
+            self.processes(out),
+            {"SAMPLESHEET", "LONG_READS:SORT_BAM", "CALL_CHUNK", "FINALIZE", "MULTIQC"},
+        )
+        # Only the unsorted BAM is sorted, and the input file is left untouched.
+        trace = (out / "pipeline_info" / "trace.txt").read_text()
+        self.assertEqual(re.findall(r"LONG_READS:SORT_BAM \((\w+)\)", trace), ["Uncontrolled"])
+        unsorted = out.parent / "Uncontrolled" / "Uncontrolled.sorted.bam"
+        self.assertEqual(unsorted.stat().st_mtime, self.INPUT_MTIME)
         self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
         self.assertEqual((info["genome"], info["fasta"], info["ref_cache"]), (None, None, None))
         # --long_reads loosens the clip and indel limits together.
@@ -279,14 +291,21 @@ class NextflowTests(unittest.TestCase):
 
     @staticmethod
     def bam_sheet(directory: Path, samples: list[str]) -> str:
-        """Empty indexed BAMs, all named reads.bam, so the treated and control
-        BAMs of one task share a file name."""
+        """Header-only BAMs. Treated and Control are sorted, indexed, and both
+        named reads.bam, so the treated and control BAMs of one task share a
+        file name. Uncontrolled is unsorted and already named like SORT_BAM's
+        output, which must not overwrite it."""
         rows = ["sample,bam,control"]
         for sample in samples:
-            bam = directory / sample / "reads.bam"
+            unsorted = sample == "Uncontrolled"
+            bam = directory / sample / (f"{sample}.sorted.bam" if unsorted else "reads.bam")
             bam.parent.mkdir()
-            bam.touch()
-            Path(f"{bam}.bai").touch()
+            header = {"HD": {"VN": "1.6", "SO": "unsorted" if unsorted else "coordinate"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+            with pysam.AlignmentFile(str(bam), "wb", header=header):
+                pass
+            if not unsorted:
+                Path(f"{bam}.bai").touch()
+            os.utime(bam, (NextflowTests.INPUT_MTIME, NextflowTests.INPUT_MTIME))
             rows.append(f"{sample},{bam},{'Control' if sample == 'Treated' else ''}")
         return "\n".join(rows) + "\n"
 

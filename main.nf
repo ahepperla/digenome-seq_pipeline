@@ -7,7 +7,8 @@
  *   -> FINALIZE -> MULTIQC
  *
  * Long-read samples are aligned BAMs, so they skip PREPARE_INDEX, FASTP, and
- * ALIGN. Calling rules live in bin/cleavage/ and docs/cleavage_algorithm.md.
+ * ALIGN; SORT_BAM sorts any that aren't coordinate-sorted and indexed. Calling
+ * rules live in bin/cleavage/ and docs/cleavage_algorithm.md.
  */
 
 include { validateParameters } from 'plugin/nf-schema'
@@ -53,13 +54,23 @@ workflow {
     MULTIQC(aligned.qc.mix(FINALIZE.out.multiqc).collect())
 }
 
-// Long-read samples are aligned BAMs, called as given.
+// Long-read samples are aligned BAMs. The samplesheet check gives an index
+// only for a BAM that is coordinate-sorted and indexed; any other is sorted.
 workflow LONG_READS {
     take:
     samples
 
+    main:
+    def bams = samples.branch { record ->
+        ready: record.bam_index
+        unsorted: true
+    }
+    SORT_BAM(bams.unsorted.map { record -> tuple(sampleMeta(record), file(record.bam)) })
+
     emit:
-    bam = samples.map { record -> tuple(sampleMeta(record), file(record.bam), file(record.bam_index)) }
+    bam = bams.ready
+        .map { record -> tuple(sampleMeta(record), file(record.bam), file(record.bam_index)) }
+        .mix(SORT_BAM.out)
     qc = channel.empty()
 }
 
@@ -300,6 +311,32 @@ process ALIGN {
     """
     touch ${meta.sample}.sorted.markdup.bam ${meta.sample}.sorted.markdup.bam.bai
     touch ${meta.sample}.flagstat.txt ${meta.sample}.stats.txt ${meta.sample}.markdup.metrics.txt
+    """
+}
+
+// A copy of a long-read BAM, coordinate-sorted and indexed. It stays in the
+// work directory. The input is staged under input/ so that a BAM already named
+// <sample>.sorted.bam is only read, never overwritten.
+process SORT_BAM {
+    tag "${meta.sample}"
+
+    input:
+    tuple val(meta), path(bam, stageAs: 'input/*')
+
+    output:
+    tuple val(meta), path("${meta.sample}.sorted.bam"), path("${meta.sample}.sorted.bam.bai")
+
+    script:
+    // Half the memory goes to samtools sort's per-thread buffers; the rest is headroom.
+    def buffer_mb = (task.memory.toMega() / 2 / task.cpus) as int
+    """
+    samtools sort -@ ${task.cpus} -m ${buffer_mb}M -o ${meta.sample}.sorted.bam ${quote(bam)}
+    samtools index -@ ${task.cpus} ${meta.sample}.sorted.bam
+    """
+
+    stub:
+    """
+    touch ${meta.sample}.sorted.bam ${meta.sample}.sorted.bam.bai
     """
 }
 

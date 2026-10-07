@@ -12,8 +12,8 @@ long reads with `--long_reads`.
 Steps: samplesheet check → bwa-mem2 index (shared cache) → fastp → bwa-mem2
 alignment and duplicate marking → cleavage calling in parallel coordinate
 chunks → per-sample finalize (pairing, sample-wide statistics, filters) →
-MultiQC. Long reads arrive aligned and start at cleavage calling. How calls
-are made is in
+MultiQC. Long reads arrive aligned, are sorted if they need it, and start at
+cleavage calling. How calls are made is in
 [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md); every parameter is in
 [docs/parameters.md](docs/parameters.md).
 
@@ -97,8 +97,11 @@ Treated,/data/Treated.sorted.bam,Untreated,
 Untreated,/data/Untreated.sorted.bam,,
 ```
 
-- Each sample is one row and one coordinate-sorted BAM, indexed as
-  `<bam>.bai` or `<bam>.csi`; merge a sample's runs first.
+- Each sample is one row and one aligned BAM; merge a sample's runs first.
+- A BAM that is coordinate-sorted with `<bam>.bai` or `<bam>.csi` beside it
+  is used as is. Any other is sorted and indexed first, into the work
+  directory; your file is only read. Index your sorted BAMs to skip that step.
+- Unaligned BAMs, such as raw basecaller output, are rejected.
 - `control` and `variant_vcf` work as they do for short reads.
 - Reads flagged as duplicates are not counted, as with short reads; marking
   them is up to you.

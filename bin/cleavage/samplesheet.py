@@ -5,7 +5,9 @@ Each row is one FASTQ pair, or one single-end FASTQ when fastq_2 is blank.
 Rows that share a sample name are lanes of that sample.
 
 Long-read mode: columns sample, bam (required); control, variant_vcf (optional).
-Each row is one aligned BAM. Each sample must have exactly one row.
+Each row is one aligned BAM. Each sample must have exactly one row. A BAM that
+is coordinate-sorted with a .bai or .csi index beside it is called as given;
+any other gets an empty bam_index, and the workflow sorts and indexes it.
 
 Every problem in the sheet is reported at once.
 """
@@ -16,6 +18,8 @@ import csv
 import json
 import re
 from pathlib import Path
+
+import pysam
 
 SHORT_READ_REQUIRED = ["sample", "fastq_1", "fastq_2"]
 LONG_READ_REQUIRED = ["sample", "bam"]
@@ -200,8 +204,9 @@ def check_fastq(label: str, path: str, owner: str, file_owners: dict[str, str], 
 
 
 def check_bam(path: str, owner: str, file_owners: dict[str, str], problem) -> tuple[str, str]:
-    """Return the resolved BAM and its .bai or .csi index. A file may be used
-    once in the whole sheet. Sort order is checked when the caller opens it."""
+    """Return the resolved BAM and its .bai or .csi index. The index is empty
+    unless the BAM is coordinate-sorted and indexed; the workflow then sorts
+    and indexes it. A file may be used once in the whole sheet."""
     if not BAM_SUFFIX.search(path):
         problem(f"bam must end with .bam: {path}")
     resolved = str(Path(path).expanduser().resolve())
@@ -212,11 +217,27 @@ def check_bam(path: str, owner: str, file_owners: dict[str, str], problem) -> tu
     if not Path(resolved).is_file():
         problem(f"bam file does not exist: {path}")
         return resolved, ""
+    if bam_sort_order(resolved, problem) != "coordinate":
+        return resolved, ""
     for suffix in (".bai", ".csi"):
         if Path(resolved + suffix).is_file():
             return resolved, resolved + suffix
-    problem(f"bam is not indexed with .bai or .csi: {resolved}")
     return resolved, ""
+
+
+def bam_sort_order(path: str, problem) -> str | None:
+    """The sort order in an aligned BAM's header. Unaligned BAMs, such as
+    basecaller output, have no reference sequences and are rejected."""
+    try:
+        with pysam.AlignmentFile(path, "rb", check_sq=False) as bam:
+            header = bam.header.to_dict()
+    except (OSError, ValueError) as error:
+        problem(f"bam could not be read as a BAM file: {path} ({error})")
+        return None
+    if not header.get("SQ"):
+        problem(f"bam has no reference sequences, so it is not aligned: {path}")
+        return None
+    return header.get("HD", {}).get("SO")
 
 
 def check_vcf(path: str, problem) -> tuple[str, str]:
