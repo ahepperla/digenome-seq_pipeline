@@ -14,6 +14,51 @@ import pysam
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from cleavage.call import call_chunk  # noqa: E402
 from cleavage.finalize import finalize  # noqa: E402
+from cleavage.settings import CallerSettings, settings_from_dict  # noqa: E402
+
+# Permissive settings used by the chunking tests.
+CHUNK_SETTINGS = {
+    "keep_multimappers": True,
+    "ndigenome_min_count": 5,
+    "ndigenome_min_fraction": 0.20,
+    "ndigenome_min_mapq": 0,
+    "ndigenome_opposite_window": 2,
+    "ndigenome_ambiguous_min_count": 2,
+    "ndigenome_ambiguous_min_fraction": 0.05,
+    "digenome_overhang": 0,
+    "digenome_pair_window": 2,
+    "digenome_min_mapq": 0,
+    "digenome_forward_cutoff": 4,
+    "digenome_reverse_cutoff": 4,
+    "digenome_depth_cutoff": 4,
+    "digenome_fraction_cutoff": 0.20,
+    "digenome_pair_score_cutoff": 0.20,
+    "cleavage_artifact_window": 10,
+    "cleavage_max_softclip_fraction": 0.20,
+    "cleavage_max_indel_fraction": 0.20,
+    "cleavage_min_support_mean_mapq": 0.0,
+    "cleavage_control_min_depth": 1,
+    "cleavage_control_max_fraction": 0.05,
+    "cleavage_control_min_fold": 3.0,
+    "cleavage_control_max_q": 0.05,
+}
+
+# Settings used by the single-site caller tests.
+SITE_SETTINGS = {
+    **CHUNK_SETTINGS,
+    "keep_multimappers": False,
+    "ndigenome_min_mapq": 1,
+    "ndigenome_opposite_window": 5,
+    "digenome_min_mapq": 1,
+    "digenome_pair_score_cutoff": 1.0,
+    "cleavage_min_support_mean_mapq": 10.0,
+}
+
+
+def make_settings(analysis: str, base: dict | None = None, **overrides) -> CallerSettings:
+    """Caller settings for tests: SITE_SETTINGS unless `base` is given."""
+    return settings_from_dict({**(base or SITE_SETTINGS), "analysis": analysis, **overrides})
+
 
 READ_LENGTH = 50
 QUERY_OPERATIONS = (0, 1, 4, 7, 8)  # M, I, S, =, X consume query bases
