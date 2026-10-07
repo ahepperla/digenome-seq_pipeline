@@ -14,14 +14,14 @@ include { validateParameters } from 'plugin/nf-schema'
 
 workflow {
     validateParameters()
-    def fasta = params.long_reads ? null : genomeFasta()
+    def genome = params.long_reads ? null : selectedGenome()
     def settings = callerSettings()
     def settings_json = groovy.json.JsonOutput.toJson(settings)
-    writeRunInfo(fasta, settings)
+    writeRunInfo(genome, settings)
 
     def code = files("${projectDir}/bin/cleavage/*.py")
     def samples = SAMPLESHEET(file(params.input), code).splitJson()
-    def aligned = params.long_reads ? LONG_READS(samples) : SHORT_READS(samples, fasta)
+    def aligned = params.long_reads ? LONG_READS(samples) : SHORT_READS(samples, genome)
 
     // Controls aren't called; each treated sample is called against its named
     // control, or with empty placeholders when it has none.
@@ -67,10 +67,10 @@ workflow LONG_READS {
 workflow SHORT_READS {
     take:
     samples
-    fasta
+    genome
 
     main:
-    def index_prefix = PREPARE_INDEX(params.genome, fasta, params.ref_cache, file("${projectDir}/bin/prepare_bwamem2_index.sh"))
+    def index_prefix = PREPARE_INDEX(genome.name, genome.fasta, params.ref_cache, file("${projectDir}/bin/prepare_bwamem2_index.sh"))
         .map { output -> output.trim() }
     FASTP(samples.map { record ->
         def fastq_1 = record.fastq_1.collect { path -> file(path) }
@@ -89,16 +89,25 @@ def sampleMeta(record) {
     return [sample: record.sample, control: record.control, is_control: record.is_control]
 }
 
-// The FASTA configured for --genome, which short reads are aligned to.
-def genomeFasta() {
+// The configured genome that --genome names, by its name or an alias in any
+// case, as [name, fasta]. Short reads are aligned to it; the index cache and
+// the run record use its name, so every alias shares one index.
+def selectedGenome() {
     if (!params.genome) {
         error("--genome is required unless --long_reads is set")
     }
-    def genome = params.genomes[params.genome]
-    if (!genome) {
-        error("Unknown --genome '${params.genome}'. Configured genomes: ${params.genomes.keySet().join(', ')}")
+    def matches = params.genomes.findAll { name, genome ->
+        ([name] + (genome.aliases ?: [])).any { alias -> alias.toString().equalsIgnoreCase(params.genome.toString()) }
     }
-    return file(genome.fasta).toString()
+    if (matches.size() > 1) {
+        error("--genome '${params.genome}' matches more than one configured genome: ${matches.keySet().join(', ')}")
+    }
+    if (!matches) {
+        def configured = params.genomes.collect { name, genome -> genome.aliases ? "${name} (${genome.aliases.join(', ')})" : name }
+        error("Unknown --genome '${params.genome}'. Configured genomes: ${configured.join('; ')}")
+    }
+    def match = matches.entrySet().first()
+    return [name: match.key, fasta: file(match.value.fasta).toString()]
 }
 
 // Settings for bin/cleavage, named like the parameters. --keep_multimappers
@@ -139,14 +148,14 @@ def callerSettings() {
 
 // Record what this run used before any task starts. Long reads arrive
 // aligned, so they use no genome or index cache.
-def writeRunInfo(fasta, settings) {
+def writeRunInfo(genome, settings) {
     def info_dir = file("${params.outdir}/pipeline_info")
     info_dir.mkdirs()
     def info = [
         analysis: params.analysis,
-        genome: params.long_reads ? null : params.genome,
-        fasta: fasta,
-        ref_cache: params.long_reads ? null : file(params.ref_cache).toString(),
+        genome: genome?.name,
+        fasta: genome?.fasta,
+        ref_cache: genome ? file(params.ref_cache).toString() : null,
         genome_blacklist: params.genome_blacklist ? file(params.genome_blacklist).toString() : null,
         cleavage_chunks: params.cleavage_chunks,
         caller_settings: settings,

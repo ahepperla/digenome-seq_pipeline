@@ -20,7 +20,7 @@
         },
         "genome": {
           "type": "string",
-          "description": "Key of params.genomes to align against (for example GRCh38). Required unless --long_reads."
+          "description": "Name or alias of a genome in params.genomes to align against, in any case (for example GRCh38 or hg38). Required unless --long_reads."
         },
         "analysis": {
           "type": "string",

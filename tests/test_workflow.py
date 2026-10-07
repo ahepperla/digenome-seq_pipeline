@@ -185,10 +185,14 @@ class NextflowTests(unittest.TestCase):
     def test_digenome_stub_run_publishes_every_output(self) -> None:
         samples = ["Treated", "Control", "Uncontrolled", "SingleEnd"]
         called = ["Treated", "Uncontrolled", "SingleEnd"]
-        out, info = self.stub_run("digenome", self.fastq_sheet, samples, ["--keep_multimappers"])
+        # SMOKE is an alias of the test profile's genome, in another case.
+        out, info = self.stub_run("digenome", self.fastq_sheet, samples, ["--keep_multimappers", "--genome", "SMOKE"])
         self.assertEqual(self.published(out), self.expected_files("digenome", samples, called))
         self.assertEqual(self.processes(out), self.SHORT_READ_PROCESSES)
         self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
+        # The index and the run record use the genome's name, not the alias.
+        self.assertIn("SHORT_READS:PREPARE_INDEX (tiny)", (out / "pipeline_info" / "trace.txt").read_text())
+        self.assertEqual(info["genome"], "tiny")
         # --keep_multimappers lowers every MAPQ threshold together.
         settings = info["caller_settings"]
         self.assertEqual(

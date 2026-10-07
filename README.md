@@ -122,14 +122,16 @@ either. Override resources, images, or genomes with your own file and
 `-c custom.config`.
 
 Configured genomes are `GRCh38`, `GRCh37`, and `GRCm39` (paths in
-`nextflow.config`). To add one:
+`nextflow.config`). `--genome` also takes their aliases, in any case: `hg38`
+and `human_hg38`, `hg19` and `human_hg19`, `mm39` and `mouse_mm39`. All names
+for a genome share one index. To add a genome:
 
 ```groovy
 // custom.config
-params.genomes = [MyGenome: [fasta: '/path/to/MyGenome.fa']]
+params.genomes = [MyGenome: [fasta: '/path/to/MyGenome.fa', aliases: ['mine']]]
 ```
 
-then run with `-c custom.config --genome MyGenome`.
+then run with `-c custom.config --genome MyGenome` (or `--genome mine`).
 
 ## Key options
 

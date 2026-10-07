@@ -27,16 +27,18 @@ and invalid values, and checks that required parameters are supplied.
 | Parameter | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
 | `--input` | Path | `null` | Yes | Samplesheet CSV: `sample`, `fastq_1`, `fastq_2`, and optional `control` and `variant_vcf`; with `--long_reads`, `sample`, `bam`, and optional `control` and `variant_vcf`. See README.md for the rules. |
-| `--genome` | String | `null` | Yes, except with `--long_reads` | Key of params.genomes to align against (for example GRCh38). Long-read BAMs are already aligned, so it isn't needed then. |
+| `--genome` | String | `null` | Yes, except with `--long_reads` | Name or alias of a genome in params.genomes to align against, in any case (for example GRCh38 or hg38). Long-read BAMs are already aligned, so it isn't needed then. |
 | `--analysis` | Choice | `digenome` | No | Calling mode: `digenome` pairs forward and reverse endpoints into DSBs; `ndigenome` calls isolated strand endpoints (SSBs, nicks). One mode applies to the complete run. |
 | `--outdir` | Path | `results` | No | Published results directory. Use a separate one for each run. |
 | `--genome_blacklist` | Path | `null` | No | Optional BED or BED.gz of regions to skip, with BAM contig names and 0-based half-open coordinates. |
 | `--ref_cache` | Path | `${projectDir}/reference_cache` | No | Shared bwa-mem2 index cache, keyed by genome, FASTA SHA-256, and bwa-mem2 version. |
 | `--publish_trimmed_fastqs` | Boolean | `false` | No | Also publish the fastp-trimmed FASTQs. |
 
-`params.genomes` maps genome names to a FASTA path. Add or override entries in
-a Nextflow configuration file rather than on the command line. Repository
-defaults are `GRCh38`, `GRCh37`, and `GRCm39`.
+`params.genomes` maps genome names to a FASTA path and optional aliases. Add or
+override entries in a Nextflow configuration file rather than on the command
+line. Repository defaults are `GRCh38` (aliases `hg38`, `human_hg38`),
+`GRCh37` (`hg19`, `human_hg19`), and `GRCm39` (`mm39`, `mouse_mm39`). The index
+cache and the run record use the name, so a genome's aliases share one index.
 
 ## Execution
 
@@ -184,7 +186,6 @@ configured through configuration files instead of pipeline parameters:
 - `index_lock_timeout_seconds`: fixed at 48 hours in `bin/prepare_bwamem2_index.sh`
 - `index_stale_lock_seconds`: fixed at 48 hours in `bin/prepare_bwamem2_index.sh`
 - `publish_concat_fastqs`: lane concatenation happens inside the FASTP process
-- genome aliases: use the canonical genome name (e.g., `GRCh38` instead of `hg38`)
 - the samplesheet `lane` column: repeat the sample name on each lane's row instead
 
 ## Nextflow runtime options
