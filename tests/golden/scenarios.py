@@ -2,9 +2,10 @@
 
 Each scenario is a treated BAM plus optional control, VCF, and blacklist, and
 caller settings named exactly like the pipeline parameters. The scenarios cover
-the calling rules in AGENTS.md: endpoint counting filters, every nDigenome
-class, Digenome pairing priority and conflict chains, overhangs, blacklists,
-controls, known indels, artifacts, and MAPQ-0 multimappers.
+the calling rules in docs/cleavage_algorithm.md: endpoint counting filters,
+every nDigenome class, Digenome pairing priority and conflict chains,
+overhangs, blacklists, controls, known indels, artifacts, and MAPQ-0
+multimappers.
 """
 
 from __future__ import annotations

@@ -33,8 +33,7 @@ from cleavage.output import DIGENOME_COLUMNS, NDIGENOME_COLUMNS  # noqa: E402
 from cleavage.settings import CallerSettings  # noqa: E402
 
 TIERS = ["all", "high_confidence", "manual_review", "artifact"]
-# New Digenome column -> old column, where the name changed (decision
-# "Streamlined, mode-specific output columns" in docs/decisions.md).
+# New Digenome column -> old column, where the refactor renamed it.
 RENAMED = {
     "combined_endpoint_count": "endpoint_count",
     "combined_depth": "strand_depth",
@@ -205,8 +204,8 @@ def compare(args, legacy_prefix: str, new_prefix: str) -> list[str]:
 
 def score_agreement(prefix: str, cutoff: float) -> str:
     """How often pair score > `cutoff` agrees with RGEN score > 2.5, over the
-    pairs that pass every other caller threshold (docs/decisions.md,
-    "The Digenome pair-score cutoff defaults to 1.1")."""
+    pairs that pass every other caller threshold ("Cutoff provenance" in
+    docs/cleavage_algorithm.md)."""
     with open(f"{prefix}.digenome.all.tsv", newline="") as handle:
         pairs = [
             (float(row["digenome_pair_score"]), float(row["rgen_digenome_score"]) > RGEN_SCORE_CUTOFF)

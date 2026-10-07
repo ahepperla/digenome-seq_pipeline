@@ -43,6 +43,6 @@ For Digenome, the log also has a table of pair score > 1.1 against
 `rgen_digenome_score` > 2.5, the standalone RGEN cutoff, over the pairs that
 pass the count, depth, and fraction cutoffs. It gives the agreement at 1.1
 and the range of cutoffs from 0.5 to 3.0 with the best agreement. If that
-range is far from 1.1, bring the table to the project lead: 1.1 came from a
-model of cut sites (`docs/decisions.md`, "The Digenome pair-score cutoff
-defaults to 1.1"), and this is its check on real pairs.
+range is far from 1.1, reconsider the default: 1.1 came from a model of cut
+sites ("Cutoff provenance" in `docs/cleavage_algorithm.md`), and this table is
+its check on real pairs.

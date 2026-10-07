@@ -85,7 +85,7 @@ class FinalizeTests(unittest.TestCase):
         return reads
 
     def test_serial_and_chunked_outputs_are_equivalent(self) -> None:
-        """The chunk count changes runtime, never results (AGENTS.md). Uses the
+        """The chunk count changes runtime, never results. Uses the
         multi-contig golden scenario: controls, a known indel, a blacklisted
         site, and chr10 before chr3 in the header."""
         scenario = multi_contig()

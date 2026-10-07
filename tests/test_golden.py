@@ -3,7 +3,7 @@ exactly, whatever the chunk count.
 
 The expected files were written by tests/golden/build_expected.py after the
 rebuilt caller was shown to reproduce every value of the pre-refactor caller
-(commit b9455e2; see docs/decisions.md). Changing them needs the project lead.
+(commit b9455e2). Change them only for an intended output change.
 """
 
 from __future__ import annotations

@@ -15,8 +15,7 @@ production data. It runs `bash -n` on the shell scripts and every unittest:
   at 1, 2, and 4 chunks must match `tests/golden/expected/` byte for byte.
   When written, those files were checked value by value against the
   pre-refactor caller (commit `b9455e2`). `python3 tests/golden/build_expected.py`
-  rewrites them; do that only when the project lead has approved an output
-  change.
+  rewrites them; do that only for an intended output change.
 - **Caller units**: endpoints and read filters, site metrics, the RGEN score,
   nDigenome classes and ranking, Digenome pairing and matching, controls,
   Fisher and Benjamini–Hochberg, filters and tiers, the blacklist, the chunk

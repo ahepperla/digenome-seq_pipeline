@@ -2,8 +2,7 @@
 """Write the golden outputs in tests/golden/expected/ from the current caller.
 
 These files are the regression anchor for tests/test_golden.py. Rewriting them
-changes what counts as correct, so do it only with the project lead's
-decision (docs/decisions.md).
+changes what counts as correct, so do it only for an intended output change.
 
 Run from the repository root:  python3 tests/golden/build_expected.py
 """

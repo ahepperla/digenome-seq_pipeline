@@ -1,5 +1,5 @@
-"""Long-read calling: both aligned ends of each read count (decision
-"Long-read input counts both ends of each read" in docs/decisions.md).
+"""Long-read calling: both aligned ends of each read count ("Long reads" in
+docs/cleavage_algorithm.md).
 
 A synthetic 10 kb contig with reads of about 2 kb. A cut between 4999 and 5000
 leaves molecules whose left end is 5000 and molecules whose right end is 4999,

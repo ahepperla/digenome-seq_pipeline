@@ -98,7 +98,7 @@ def artifact_columns(metrics: SiteMetrics, known_indels: list[str]) -> dict:
 
 
 def artifact_reasons(row: dict, settings: CallerSettings) -> list[str]:
-    """Shared artifact filters. Comparisons follow AGENTS.md: clipping and
+    """Shared artifact filters (docs/cleavage_algorithm.md): clipping and
     indel fractions fail at >=, support MAPQ below, control fraction above,
     fold below, and q above their limits."""
     reasons = []
