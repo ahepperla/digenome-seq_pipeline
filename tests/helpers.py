@@ -6,9 +6,14 @@ read's 5' endpoint is its start; a reverse read's is its last aligned base.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pysam
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
+from cleavage.call import call_chunk  # noqa: E402
+from cleavage.finalize import finalize  # noqa: E402
 
 READ_LENGTH = 50
 QUERY_OPERATIONS = (0, 1, 4, 7, 8)  # M, I, S, =, X consume query bases
@@ -120,3 +125,36 @@ def write_vcf(
     pysam.tabix_index(str(path), preset="vcf", force=True)
     plain.unlink()
     return path
+
+
+def run_caller(
+    settings,
+    inputs: dict[str, Path | None],
+    out_dir: Path,
+    chunks: int,
+    sample: str = "Sample",
+    control_sample: str = "Control",
+) -> tuple[str, dict]:
+    """Run every chunk and the finalizer the way main.nf does. Returns the
+    output prefix and the QC report."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    control = inputs.get("control_bam")
+    summaries = []
+    for index in range(chunks):
+        chunk_prefix = out_dir / f"chunk_{index:03d}"
+        call_chunk(
+            settings,
+            bam_path=str(inputs["bam"]),
+            sample=sample,
+            index=index,
+            count=chunks,
+            out_prefix=str(chunk_prefix),
+            control_path=str(control) if control else None,
+            control_sample=control_sample if control else "",
+            vcf_path=str(inputs["vcf"]) if inputs.get("vcf") else None,
+            blacklist_path=str(inputs["blacklist"]) if inputs.get("blacklist") else None,
+        )
+        summaries.append(f"{chunk_prefix}.json")
+    prefix = str(out_dir / sample)
+    qc = finalize(settings, summaries, sample, control_sample if control else "", prefix)
+    return prefix, qc

@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bin"))
 
-from cleavage.samplesheet import validate_samplesheet, write_samples_json
+from cleavage.samplesheet import validate_samplesheet, write_samples_json  # noqa: E402
 
 
 class SamplesheetTests(unittest.TestCase):
@@ -197,7 +197,10 @@ class SamplesheetTests(unittest.TestCase):
             f"ControlA,{self.fastq('CA_R1.fastq.gz')},{self.fastq('CA_R2.fastq.gz')},ControlB\n"
             f"ControlB,{self.fastq('CB_R1.fastq.gz')},{self.fastq('CB_R2.fastq.gz')},\n"
         )
-        with self.assertRaisesRegex(ValueError, "Control rows must leave"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "sample 'ControlA' is the control of 'Treated' but declares control 'ControlB'",
+        ):
             validate_samplesheet(input_csv, "ndigenome")
 
     def test_inconsistent_metadata_across_lanes_rejected(self) -> None:
@@ -261,7 +264,7 @@ class SamplesheetTests(unittest.TestCase):
             f"SampleA,{shared},{self.fastq('A_R2.fastq.gz')}\n"
             f"SampleB,{shared},{self.fastq('B_R2.fastq.gz')}\n"
         )
-        with self.assertRaisesRegex(ValueError, "already used as"):
+        with self.assertRaisesRegex(ValueError, r"line 3: fastq_1 reuses FASTQ .* already used on line 2 \(SampleA\) as fastq_1"):
             validate_samplesheet(input_csv, "digenome")
 
     def test_same_basename_different_directories_accepted(self) -> None:
