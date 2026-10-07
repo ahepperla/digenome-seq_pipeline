@@ -1,7 +1,8 @@
 # Parameter reference
 
-This page is the authoritative lookup for pipeline parameters in
-`nextflow.config`. Pipeline parameters use two leading hyphens and underscores:
+This page explains every pipeline parameter. Defaults live in
+`nextflow.config`; types, ranges, and short descriptions live in
+`nextflow_schema.json` (`--help` prints them). Pipeline parameters use two leading hyphens and underscores:
 
 ```bash
 nextflow run /path/to/digenome-seq_pipeline \
@@ -183,6 +184,7 @@ configured through configuration files instead of pipeline parameters:
 - `index_stale_lock_seconds`: fixed at 48 hours in `bin/prepare_bwamem2_index.sh`
 - `publish_concat_fastqs`: lane concatenation happens inside the FASTP process
 - genome aliases: use the canonical genome name (e.g., `GRCh38` instead of `hg38`)
+- the samplesheet `lane` column: repeat the sample name on each lane's row instead
 
 ## Nextflow runtime options
 
@@ -191,7 +193,7 @@ hyphen and are interpreted by Nextflow itself.
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `-profile` | None | Selects execution configuration. Available profiles are `standard`, `slurm`, `apptainer`, and `longleaf`; production runs should select the appropriate profile explicitly. |
+| `-profile` | None | Selects execution configuration: `longleaf`, `apptainer`, `slurm`, or `test` (list `test` last, e.g. `apptainer,test`). Production runs should use `longleaf`. |
 | `-resume` | Off | Reuses compatible cached tasks from the selected work directory. Changed scripts, parameters, or inputs cause affected tasks to run again. |
 | `-work-dir` | `work` | Nextflow task work directory. Use stable, separate locations for independent production runs. |
 | `-c` | None | Adds a Nextflow configuration file. Useful for custom genomes, containers, resources, or site settings. |

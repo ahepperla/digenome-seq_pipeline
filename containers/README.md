@@ -22,8 +22,13 @@ copied or provisioned there before running the pipeline.
 | --- | --- |
 | `fastp_v1.3.3.sif` | read trimming |
 | `bwa-mem2_v2.3_samtools_v1.22.sif` | alignment and BAM processing |
-| `multiqc_v1.35.sif` | MultiQC report generation |
-| `cleavage_pysam_v0.23.3.sif` | unified Digenome/nDigenome caller |
+| `multiqc_v1.35.sif` | MultiQC report |
+| `cleavage_pysam_v0.23.3.sif` | samplesheet checks and the Digenome/nDigenome caller |
+
+Each process's image is set in `conf/base.config`; override it with your own
+`-c` config. Every run copies `checksums.sha256` and `sources.tsv` into
+`<outdir>/pipeline_info/` as `container_checksums.sha256` and
+`container_sources.tsv`.
 
 ## Cleavage image
 

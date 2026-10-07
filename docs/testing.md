@@ -1,119 +1,69 @@
 # Testing
 
-## Unit and integration-style tests
-
-Run:
+## Local suite
 
 ```bash
-python3 -m pip install -r requirements-test.txt
+uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements-test.txt
+export PATH="$PWD/.venv/bin:$PATH"
 ./tests/run_tests.sh
 ```
 
-The suite uses Python `unittest` and synthetic indexed BAMs generated with
-pysam. It does not require production FASTQs or references. When Nextflow is
-installed, it also runs `nextflow lint` on `main.nf` and stub runs of both
-calling modes.
+The suite needs Python with pysam 0.23.3 (matching the cleavage image) and no
+production data. It runs `bash -n` on the shell scripts and every unittest:
 
-Coverage includes:
+- **Golden outputs** (`test_golden.py`): six synthetic scenarios in both modes
+  at 1, 2, and 4 chunks must reproduce every value the pre-refactor caller
+  wrote (`tests/golden/legacy/`, with old columns mapped to the new layout).
+  `python3 tests/golden/build_legacy.py` regenerates those files from commit
+  `b9455e2`.
+- **Caller units**: endpoints and read filters, site metrics, the RGEN score,
+  nDigenome classes and ranking, Digenome pairing and matching, controls,
+  Fisher and Benjamini–Hochberg, filters and tiers, the blacklist, the chunk
+  plan, and every finalizer check. Threshold tests sit exactly on each
+  boundary, so a `>` turned into `>=` fails.
+- **Samplesheet** checks, one test per rule.
+- **Index cache** (`test_index_cache.py`) with a fake `bwa-mem2`: reuse,
+  content addressing, version isolation, quarantine, stale-lock recovery,
+  permissions under a restrictive umask.
+- **Workflow** (`test_workflow.py`): parameter names and defaults agree across
+  `nextflow.config`, `nextflow_schema.json`, and `parameters.md`; container
+  provenance; the smoke fixture. With `nextflow` installed it also runs
+  `nextflow lint` and stub runs of both modes (`-stub-run`, no tools needed),
+  checking every published file, one chunk task per chunk per called sample,
+  that controls are not called, and the `--keep_multimappers` settings.
 
-- samplesheet validation (columns, duplicates, R1/R2, paired-end enforcement)
-- sample and control names (character restrictions, control row validation)
-- metadata and control consistency
-- forward/reverse and complex-CIGAR endpoint coordinates
-- duplicate, secondary, supplementary, and MAPQ filtering
-- Digenome DSB pairing, overhangs, scores, and one-strand rejection
-- deterministic maximum-cardinality Digenome pairing
-- nDigenome SSB, possible DSB, and ambiguous calls
-- opposite-strand ranking by threshold pass and fraction
-- shared clipping, indel, VCF, control, and artifact-risk behavior
-- detailed matched-control filter reasons and candidate output tiers
-- VCF contig compatibility and insufficient-control-coverage handling
-- complete, gap-free, nonoverlapping chunk interval validation
-- blacklist-adjusted callable-work balancing, including fully masked contigs
-- optional BED/BED.gz blacklist parsing, validation, provenance, and scanning
-- Fisher exact and Benjamini-Hochberg calculations
-- parameter schema compliance
-- complete index reuse
-- FASTA fingerprint changes
-- partial index quarantine
-- stale local lock recovery
-- shared cache and lock permissions under a restrictive user umask
-- static workflow and container contracts
+Nextflow 25.10 and later parse command-line parameters as strings under their
+strict parser, which nf-schema 2.5.1 then rejects. For local runs, set
+`NXF_SYNTAX_PARSER=v1` to match Longleaf's Nextflow 25.04; the stub tests do.
 
-## Smoke test
-
-Generate fixture inputs:
+## Smoke test with real tools
 
 ```bash
-python3 tests/fixtures/build_smoke_fixture.py
+python3 tests/fixtures/build_smoke_fixture.py      # writes tests/fixtures/generated/
+nextflow run . -profile apptainer,test --analysis ndigenome --outdir smoke_ndigenome -work-dir smoke_work_ndigenome
+nextflow run . -profile apptainer,test --analysis digenome --outdir smoke_digenome -work-dir smoke_work_digenome
 ```
 
-Build the unified image, then run on a local workstation with Apptainer and
-Nextflow:
+On Longleaf use `-profile longleaf,test`. The `test` profile points at the
+generated samplesheet and `tests/fixtures/tiny.fa`, uses three chunks, and caps
+each task at 2 CPUs, 4 GB, and 1 hour.
 
-```bash
-./containers/build_cleavage.sh
+The fixture has 33 uniquely aligned read pairs: a DSB at position 250 (11
+forward reads start there and 11 reverse reads end there) and an SSB at 300
+(11 forward reads start there). Expect a Digenome pair at 250 and, in
+nDigenome mode, a passing SSB at 300 plus POSSIBLE_DSB rows at 250. The
+fixture checks orchestration and integration, not biological sensitivity.
 
-nextflow run . \
-  -profile apptainer \
-  -c tests/fixtures/smoke.config \
-  --input tests/fixtures/tiny_samplesheet.csv \
-  --genome tiny \
-  --analysis ndigenome \
-  --outdir smoke_results \
-  -work-dir smoke_work
-```
-
-Repeat with:
-
-```bash
-nextflow run . \
-  -profile apptainer \
-  -c tests/fixtures/smoke.config \
-  --input tests/fixtures/tiny_samplesheet.csv \
-  --genome tiny \
-  --analysis digenome \
-  --outdir smoke_results_dsb \
-  -work-dir smoke_work_dsb
-```
-
-The fixture has a DSB at 250 and an SSB at 300, each with 11 forward and 11 reverse
-endpoints (or 11 forward-only for the SSB). After Digenome smoke completion,
-`Tiny.digenome.all.tsv` should contain at least one data row for the paired
-endpoints. After nDigenome smoke completion, the audit output should contain
-evidence of the DSB (as `POSSIBLE_DSB` or `AMBIGUOUS` rows) and a passing `SSB`
-row at 300. The fixture validates orchestration and basic caller integration,
-not biological sensitivity.
-
-## Longleaf validation
-
-On Longleaf, use the SLURM-backed `longleaf` profile rather than the local
-`apptainer` profile:
-
-```bash
-nextflow run . \
-  -profile longleaf \
-  -c tests/fixtures/smoke.config \
-  --input tests/fixtures/tiny_samplesheet.csv \
-  --genome tiny \
-  --analysis ndigenome \
-  --outdir smoke_results \
-  -work-dir smoke_work
-```
-
-Repeat with `--analysis digenome`, a separate output directory, and a separate
-work directory. The smoke configuration reduces resources only for the tiny
-fixture; production runs retain `conf/base.config` resources.
-
-The following cannot be proven by local tests:
+## What only Longleaf can show
 
 - SLURM submission and accounting
 - Longleaf paths and mounts (`/proj`, `/work`, `/users`, `/overflow`, `/nas`)
-- production SIF execution
-- full-depth runtime on human whole-genome sequencing
+- the production images
+- full-depth runtime
 - biological sensitivity and specificity
 
-Run both smoke modes on Longleaf, then validate with known-positive material,
-untreated controls, and representative library preparations. Include a
-repetitive-region truth set when validating `--keep_multimappers`. See
-`tests/benchmark/README.md` for the Longleaf benchmark kit.
+Before production use, run both smoke modes on Longleaf, run the benchmark in
+[tests/benchmark/README.md](../tests/benchmark/README.md) on a real sample,
+then validate with known-positive material, untreated controls, and
+representative library preparations. Include a repetitive-region truth set
+when validating `--keep_multimappers`.
