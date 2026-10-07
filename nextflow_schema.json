@@ -226,7 +226,7 @@
           "minimum": 0,
           "maximum": 1,
           "default": 0.2,
-          "description": "HIGH_5P_SOFTCLIP when the 5' soft-clipped fraction of supporting reads is >= this."
+          "description": "HIGH_5P_SOFTCLIP when the fraction of supporting reads clipped at the end that forms the endpoint (the 5' end for short reads) is >= this."
         },
         "cleavage_max_indel_fraction": {
           "type": "number",

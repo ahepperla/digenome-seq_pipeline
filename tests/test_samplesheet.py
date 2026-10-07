@@ -443,8 +443,7 @@ class SamplesheetTests(unittest.TestCase):
             f"Sample,{bam}\n"
         )
         records = validate_samplesheet(input_csv, "digenome", long_reads=True)
-        self.assertEqual(len(records), 1)
-        self.assertTrue(records[0]["bam_index"].endswith(".csi"))
+        self.assertEqual([record["bam_index"] for record in records], [f"{bam.resolve()}.csi"])
 
     def test_long_read_missing_bam_index_rejected(self) -> None:
         """Test that BAM without .bai or .csi index is rejected."""

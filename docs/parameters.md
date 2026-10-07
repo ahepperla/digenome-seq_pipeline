@@ -137,7 +137,7 @@ Only unfiltered `SSB` rows enter the high-confidence nDigenome output.
 | Parameter | Type | Default | Filter condition | Description |
 | --- | --- | --- | --- | --- |
 | `--cleavage_artifact_window` | Integer | `10` | Measurement window | Bases on each side of an endpoint used for MAPQ, mismatch, indel, clipping, and known-indel checks. |
-| `--cleavage_max_softclip_fraction` | Number | `0.2` | Soft-clipped fraction `>=` value | HIGH_5P_SOFTCLIP when the 5' soft-clipped fraction of supporting reads is >= this. |
+| `--cleavage_max_softclip_fraction` | Number | `0.2` | Soft-clipped fraction `>=` value | HIGH_5P_SOFTCLIP when the fraction of supporting reads clipped at the end that forms the endpoint (the 5' end for short reads) is >= this. |
 | `--cleavage_max_indel_fraction` | Number | `0.2` | Local indel fraction `>=` value | NEARBY_INDEL when the fraction of local alignments with a nearby indel is >= this. |
 | `--cleavage_min_support_mean_mapq` | Number | `10` | Mean MAPQ `<` value | LOW_SUPPORT_MAPQ when supporting reads' mean MAPQ is < this. 0 with --keep_multimappers. |
 | `--cleavage_control_min_depth` | Integer | `1` | Control depth `<` value | INSUFFICIENT_CONTROL_COVERAGE when the control depth is < this. |

@@ -137,15 +137,16 @@ def callerSettings() {
     ]
 }
 
-// Record what this run used before any task starts.
+// Record what this run used before any task starts. Long reads arrive
+// aligned, so they use no genome or index cache.
 def writeRunInfo(fasta, settings) {
     def info_dir = file("${params.outdir}/pipeline_info")
     info_dir.mkdirs()
     def info = [
         analysis: params.analysis,
-        genome: params.genome,
+        genome: params.long_reads ? null : params.genome,
         fasta: fasta,
-        ref_cache: file(params.ref_cache).toString(),
+        ref_cache: params.long_reads ? null : file(params.ref_cache).toString(),
         genome_blacklist: params.genome_blacklist ? file(params.genome_blacklist).toString() : null,
         cleavage_chunks: params.cleavage_chunks,
         caller_settings: settings,

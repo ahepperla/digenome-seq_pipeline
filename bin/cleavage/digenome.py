@@ -135,6 +135,7 @@ def endpoint_record(
         record["control_metrics"] = asdict(measure_site(control_bam, contig, position, strand, settings))
     # A long read spanning the cut covers both endpoints of a pair, so the pair's
     # combined depth is measured here, per partner, with each read counted once.
+    # Partners are string keys because the record goes through JSON.
     if settings.long_reads and strand == "+":
         record["pair_depths"] = {
             str(partner): [

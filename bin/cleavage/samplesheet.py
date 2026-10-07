@@ -126,7 +126,15 @@ def check_row(
         add_short_read_row(row, sample, metadata, analysis, owner, samples, file_owners, problem)
 
 
-def add_long_read_row(row, sample, metadata, owner, samples, file_owners, problem) -> None:
+def add_long_read_row(
+    row: dict[str, str],
+    sample: str,
+    metadata: dict[str, str],
+    owner: str,
+    samples: dict[str, dict],
+    file_owners: dict[str, str],
+    problem,
+) -> None:
     """A long-read sample is one aligned BAM, so it has exactly one row."""
     if not row.get("bam"):
         problem("bam is blank")
@@ -138,7 +146,16 @@ def add_long_read_row(row, sample, metadata, owner, samples, file_owners, proble
     samples[sample] = {"sample": sample, "bam": bam, "bam_index": bam_index, **metadata}
 
 
-def add_short_read_row(row, sample, metadata, analysis, owner, samples, file_owners, problem) -> None:
+def add_short_read_row(
+    row: dict[str, str],
+    sample: str,
+    metadata: dict[str, str],
+    analysis: str,
+    owner: str,
+    samples: dict[str, dict],
+    file_owners: dict[str, str],
+    problem,
+) -> None:
     """One FASTQ pair, or one single-end FASTQ; rows of one sample are its lanes."""
     fastq_1, fastq_2 = row.get("fastq_1", ""), row.get("fastq_2", "")
     if not fastq_1:

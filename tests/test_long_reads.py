@@ -20,7 +20,7 @@ import pysam
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import make_read, make_settings, run_caller, write_bam  # noqa: E402
 
-from cleavage.bam import ReadEnd, measure_site, read_ends  # noqa: E402
+from cleavage.bam import ReadEnd, RgenCounts, measure_site, read_ends, rgen_counts  # noqa: E402
 from cleavage.output import format_value  # noqa: E402
 from cleavage.stats import fisher_exact_two_sided  # noqa: E402
 
@@ -40,14 +40,15 @@ def stagger(index: int, reverse: bool) -> int:
     return 10 * index + (5 if reverse else 0)
 
 
-def cut_reads(prefix: str, per_orientation: int, orientations=BOTH) -> list:
-    """Reads ending at the cut from each side: left ends at 5000, right ends at 4999."""
+def cut_reads(prefix: str, per_orientation: int, orientations=BOTH, left_last: int = CUT - 1) -> list:
+    """Reads ending at the cut from each side: left ends at 5000, right ends at
+    `left_last` (4999 for a blunt cut)."""
     reads = []
     for reverse in orientations:
         for index in range(per_orientation):
             length = 2000 + stagger(index, reverse)
             reads.append(long_read(f"{prefix}_right_{reverse}_{index}", CUT, CUT + length, reverse))
-            reads.append(long_read(f"{prefix}_left_{reverse}_{index}", CUT - length, CUT, reverse))
+            reads.append(long_read(f"{prefix}_left_{reverse}_{index}", left_last + 1 - length, left_last + 1, reverse))
     return reads
 
 
@@ -65,13 +66,14 @@ def spanning_reads(prefix: str, per_orientation: int, orientations=BOTH) -> list
     ]
 
 
-def long_read_settings(analysis: str):
+def long_read_settings(analysis: str, **overrides):
     """What main.nf passes with --long_reads: clip and indel limits at 1.0."""
     return make_settings(
         analysis,
         long_reads=True,
         cleavage_max_softclip_fraction=1.0,
         cleavage_max_indel_fraction=1.0,
+        **overrides,
     )
 
 
@@ -109,14 +111,23 @@ class LongReadDigenomeTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def call(self, treated: list, control: list | None = None, chunks: int = 1, name: str = "out") -> list[dict]:
+    def call(
+        self,
+        treated: list,
+        control: list | None = None,
+        chunks: int = 1,
+        name: str = "out",
+        overhang: int = 0,
+        blacklist: Path | None = None,
+    ) -> list[dict]:
         inputs = {
             "bam": write_bam(self.tmp / f"{name}_treated.bam", CONTIG, treated),
             "control_bam": write_bam(self.tmp / f"{name}_control.bam", CONTIG, control) if control else None,
             "vcf": None,
-            "blacklist": None,
+            "blacklist": blacklist,
         }
-        prefix, _qc = run_caller(long_read_settings("digenome"), inputs, self.tmp / name, chunks)
+        settings = long_read_settings("digenome", digenome_overhang=overhang)
+        prefix, _qc = run_caller(settings, inputs, self.tmp / name, chunks)
         with open(f"{prefix}.digenome.all.tsv", newline="") as handle:
             return list(csv.DictReader(handle, delimiter="\t"))
 
@@ -146,16 +157,38 @@ class LongReadDigenomeTests(unittest.TestCase):
         self.assertEqual((row["control_combined_endpoint_count"], row["control_combined_depth"]), ("0", "10"))
         self.assertEqual(row["control_fisher_p"], format_value(fisher_exact_two_sided(16, 22 - 16, 0, 10)))
 
-    def test_pair_across_a_chunk_boundary_matches_one_chunk(self) -> None:
-        # Two chunks own [0, 5000) and [5000, 10000), so the forward endpoint
-        # and its partner belong to different chunks.
-        treated = cut_reads("cut", 4) + spanning_reads("bg", 3)
+    def test_chunk_count_never_changes_the_pair(self) -> None:
+        # Without a blacklist, two chunks own [0, 5000) and [5000, 10000), so
+        # the forward endpoint and its partner belong to different chunks.
+        # With overhang 3 the partner is 5 bases away, at the edge of the pair
+        # window, so a chunk must scan |overhang| + window bases past its
+        # range to find it. The blacklist ends just before the partner and
+        # moves the chunk boundaries.
         control = spanning_reads("ctl", 5)
-        one = self.call(treated, control, chunks=1, name="one")
-        self.assertEqual(len(one), 1)
-        for chunks in (2, 3):
-            with self.subTest(chunks=chunks):
-                self.assertEqual(self.call(treated, control, chunks=chunks, name=f"c{chunks}"), one)
+        for overhang, partner, blacklisted in ((0, CUT - 1, False), (3, CUT - 5, False), (3, CUT - 5, True)):
+            treated = cut_reads("cut", 4, left_last=partner) + spanning_reads("bg", 3)
+            blacklist = None
+            if blacklisted:
+                blacklist = self.tmp / "blacklist.bed"
+                blacklist.write_text(f"chr1\t{partner - 10}\t{partner}\n")
+            name = f"overhang{overhang}_{'blacklist' if blacklisted else 'open'}"
+            one = self.call(treated, control, 1, f"{name}_1", overhang, blacklist)
+            self.assertEqual(
+                [(row["forward_position_0based"], row["reverse_position_0based"]) for row in one],
+                [(str(CUT), str(partner))],
+            )
+            for chunks in (2, 3, 4):
+                with self.subTest(overhang=overhang, blacklisted=blacklisted, chunks=chunks):
+                    self.assertEqual(self.call(treated, control, chunks, f"{name}_{chunks}", overhang, blacklist), one)
+
+    def test_rgen_counts_use_both_ends(self) -> None:
+        # The comparison score counts long-read ends by the same rule.
+        reads = [long_read("forward", 1000, 3000, False), long_read("reverse", 1000, 3000, True)]
+        bam = write_bam(self.tmp / "rgen.bam", CONTIG, reads)
+        settings = long_read_settings("digenome")
+        with pysam.AlignmentFile(str(bam), "rb") as handle:
+            self.assertEqual(rgen_counts(handle, "chr1", 1000, settings), RgenCounts(2, 0, 2))
+            self.assertEqual(rgen_counts(handle, "chr1", 2999, settings), RgenCounts(0, 2, 2))
 
     def test_clip_metric_uses_the_clip_at_the_endpoint(self) -> None:
         # Two reads per endpoint are clipped at the end that forms it and one

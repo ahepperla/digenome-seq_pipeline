@@ -203,6 +203,7 @@ class NextflowTests(unittest.TestCase):
         self.assertEqual(self.published(out), self.expected_files("ndigenome", samples, called))
         self.assertEqual(self.processes(out), self.SHORT_READ_PROCESSES)
         self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
+        self.assertEqual((info["genome"], Path(info["fasta"]).name), ("tiny", "tiny.fa"))
         settings = info["caller_settings"]
         self.assertEqual((settings["ndigenome_min_mapq"], settings["cleavage_min_support_mean_mapq"]), (1, 10))
 
@@ -218,7 +219,7 @@ class NextflowTests(unittest.TestCase):
         )
         self.assertEqual(self.processes(out), {"SAMPLESHEET", "CALL_CHUNK", "FINALIZE", "MULTIQC"})
         self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
-        self.assertEqual((info["genome"], info["fasta"]), (None, None))
+        self.assertEqual((info["genome"], info["fasta"], info["ref_cache"]), (None, None, None))
         # --long_reads loosens the clip and indel limits together.
         settings = info["caller_settings"]
         self.assertEqual(

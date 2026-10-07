@@ -171,9 +171,9 @@ from the artifact limits below.
 | long reads, nDigenome | both ends, each on the read's own strand |
 
 Clips never extend an end, and an alignment whose two ends fall on one base
-contributes one endpoint. Depth at an endpoint counts the reads covering it
-that can end there on that strand: every covering read for long-read
-Digenome, and reads on that strand otherwise.
+contributes one endpoint, its left end (`+` in Digenome). Depth at an endpoint
+counts the reads covering it that can end there on that strand: every
+covering read for long-read Digenome, and reads on that strand otherwise.
 
 **Digenome.** A cut between `p - 1` and `p` leaves molecules whose left end is
 `p` and molecules whose right end is `p - 1`, sequenced in either orientation.
