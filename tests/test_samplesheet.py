@@ -407,25 +407,29 @@ class SamplesheetTests(unittest.TestCase):
             f"Control,{control_bam},,\n"
         )
         records = validate_samplesheet(input_csv, "digenome", long_reads=True)
-        self.assertEqual(len(records), 2)
-
-        treated = records[0]
-        self.assertEqual(treated["sample"], "Control")
-        self.assertEqual(treated["bam"], str(control_bam.resolve()))
-        self.assertEqual(treated["bam_index"], str(control_bam.resolve()) + ".bai")
-        self.assertEqual(treated["control"], "")
-        self.assertEqual(treated["variant_vcf"], "")
-        self.assertEqual(treated["variant_index"], "")
-        self.assertTrue(treated["is_control"])
-
-        control = records[1]
-        self.assertEqual(control["sample"], "Treated")
-        self.assertEqual(control["bam"], str(treated_bam.resolve()))
-        self.assertEqual(control["bam_index"], str(treated_bam.resolve()) + ".bai")
-        self.assertEqual(control["control"], "Control")
-        self.assertEqual(control["variant_vcf"], str(vcf.resolve()))
-        self.assertEqual(control["variant_index"], str(vcf.resolve()) + ".tbi")
-        self.assertFalse(control["is_control"])
+        self.assertEqual(
+            records,
+            [
+                {
+                    "sample": "Control",
+                    "bam": str(control_bam.resolve()),
+                    "bam_index": str(control_bam.resolve()) + ".bai",
+                    "control": "",
+                    "variant_vcf": "",
+                    "variant_index": "",
+                    "is_control": True,
+                },
+                {
+                    "sample": "Treated",
+                    "bam": str(treated_bam.resolve()),
+                    "bam_index": str(treated_bam.resolve()) + ".bai",
+                    "control": "Control",
+                    "variant_vcf": str(vcf.resolve()),
+                    "variant_index": str(vcf.resolve()) + ".tbi",
+                    "is_control": False,
+                },
+            ],
+        )
 
     def test_long_read_sheet_with_csi_index(self) -> None:
         """Test that .csi index is accepted for long-read BAM."""

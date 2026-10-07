@@ -38,7 +38,8 @@ def call_chunk(
 ) -> dict:
     if not 0 <= index < count:
         raise ValueError(f"Chunk index {index} is outside 0..{count - 1}")
-    require_paired = settings.analysis == "ndigenome"
+    # Short-read nDigenome needs paired-end libraries; long reads are single molecules.
+    require_paired = settings.analysis == "ndigenome" and not settings.long_reads
     with ExitStack() as stack:
         bam = stack.enter_context(open_bam(bam_path, "BAM"))
         check_layout(bam, settings.min_mapq, require_paired, "BAM")

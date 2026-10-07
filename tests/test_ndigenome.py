@@ -117,7 +117,7 @@ class NDigenomeTests(unittest.TestCase):
         settings = make_settings("ndigenome", ndigenome_min_count=10)
         with pysam.AlignmentFile(str(bam), "rb") as bam_handle:
             position, metrics = strongest_opposite(bam_handle, "chr1", 100, "+", settings, None)
-            competitor = measure_site(bam_handle, "chr1", 101, "-", 10, 1)
+            competitor = measure_site(bam_handle, "chr1", 101, "-", settings)
         self.assertEqual(position, 100)
         self.assertEqual((metrics.endpoint_count, metrics.strand_depth), (10, 21))
         self.assertEqual((competitor.endpoint_count, competitor.strand_depth), (11, 111))

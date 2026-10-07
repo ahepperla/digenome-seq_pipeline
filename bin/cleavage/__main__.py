@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     sheet.add_argument("input_csv")
     sheet.add_argument("output_json")
     sheet.add_argument("--analysis", required=True, choices=["digenome", "ndigenome"])
-    sheet.add_argument("--long-reads", action="store_true", help="use long-read BAM mode")
+    sheet.add_argument("--long-reads", action="store_true", help="samples are aligned long-read BAMs")
 
     call = commands.add_parser("call", help="measure one chunk of one sample")
     call.add_argument("--settings", required=True)
@@ -50,8 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> None:
     if args.command == "samplesheet":
-        long_reads = getattr(args, "long_reads", False)
-        samples = validate_samplesheet(Path(args.input_csv), args.analysis, long_reads=long_reads)
+        samples = validate_samplesheet(Path(args.input_csv), args.analysis, args.long_reads)
         write_samples_json(samples, Path(args.output_json))
         print(f"Validated {len(samples)} sample(s) for {args.analysis} analysis.")
     elif args.command == "call":

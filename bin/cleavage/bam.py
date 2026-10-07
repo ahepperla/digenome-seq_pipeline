@@ -1,9 +1,15 @@
 """Evidence read from alignments: endpoints, local site metrics, and RGEN counts.
 
-An endpoint is the 0-based aligned 5' reference base: `reference_start` for
-forward reads and `reference_end - 1` for reverse reads. Clips never extend
-it. Counts and depths use primary alignments only; secondary and
-supplementary alignments are reported as diagnostics.
+Endpoints are 0-based aligned reference bases, and clips never extend them.
+`read_ends` says which ends of an alignment count:
+- short reads: the 5' end, `reference_start` for forward reads and
+  `reference_end - 1` for reverse reads, on the read's strand;
+- long reads: both aligned ends, because a long read spans its molecule.
+  For Digenome the left end is '+' and the right end '-', the two sides a cut
+  leaves; for nDigenome both stay on the read's strand, the DNA strand of the
+  molecule.
+Counts and depths use primary alignments only; secondary and supplementary
+alignments are reported as diagnostics.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from typing import Callable, NamedTuple
 import pysam
 
 from .regions import MappedContig
+from .settings import CallerSettings
 
 INSERTION, DELETION, SOFT_CLIP, HARD_CLIP = 1, 2, 4, 5
 REFERENCE_ADVANCING = (0, 2, 3, 7, 8)  # M, D, N, =, X
@@ -81,49 +88,53 @@ def strand_of(read: pysam.AlignedSegment) -> str:
     return "-" if read.is_reverse else "+"
 
 
-def endpoint_position(read: pysam.AlignedSegment) -> int:
+class ReadEnd(NamedTuple):
+    position: int
+    strand: str
+    at_start: bool  # the end at reference_start (otherwise reference_end - 1)
+
+
+def read_ends(read: pysam.AlignedSegment, settings: CallerSettings) -> list[ReadEnd]:
+    """The endpoints an alignment shows (see the module docstring)."""
     if read.reference_start is None or read.reference_end is None:
         raise ValueError("Cannot calculate an endpoint for an unmapped alignment")
-    return read.reference_end - 1 if read.is_reverse else read.reference_start
+    left = ReadEnd(read.reference_start, strand_of(read), True)
+    right = ReadEnd(read.reference_end - 1, strand_of(read), False)
+    if not settings.long_reads:
+        return [right] if read.is_reverse else [left]
+    if settings.analysis == "digenome":
+        left, right = left._replace(strand="+"), right._replace(strand="-")
+    # A one-base alignment has a single end, so it must not count twice.
+    return [left] if left.position == right.position else [left, right]
 
 
-def five_prime_clip_length(read: pysam.AlignedSegment) -> int:
+def end_clip_length(read: pysam.AlignedSegment, at_start: bool) -> int:
+    """The soft or hard clip on one aligned end of `read`."""
     cigar = read.cigartuples or []
     if not cigar:
         return 0
-    operation, length = cigar[-1] if read.is_reverse else cigar[0]
+    operation, length = cigar[0] if at_start else cigar[-1]
     return length if operation in (SOFT_CLIP, HARD_CLIP) else 0
 
 
-def indel_events(read: pysam.AlignedSegment) -> list[tuple[int, str, int]]:
-    """(reference position, "INS" or "DEL", length) for each CIGAR indel."""
-    events: list[tuple[int, str, int]] = []
+def indels_overlapping(read: pysam.AlignedSegment, start: int, end: int) -> list[tuple[int, str, int]]:
+    """(reference position, "INS" or "DEL", length) for each CIGAR indel that
+    touches [start, end). A deletion counts when any deleted base is inside; an
+    insertion when its position is inside."""
+    overlapping = []
     position = read.reference_start
-    if position is None:
-        return events
     for operation, length in read.cigartuples or []:
+        if position >= end:
+            break  # CIGAR operations run left to right, so the rest are past the window
         if operation == INSERTION:
-            events.append((position, "INS", length))
+            if position >= start:
+                overlapping.append((position, "INS", length))
         elif operation == DELETION:
-            events.append((position, "DEL", length))
+            if position + length > start:
+                overlapping.append((position, "DEL", length))
             position += length
         elif operation in REFERENCE_ADVANCING:
             position += length
-    return events
-
-
-def indels_overlapping(read: pysam.AlignedSegment, start: int, end: int) -> list[tuple[int, str, int]]:
-    """Indel events of `read` that touch [start, end). A deletion counts when
-    any deleted base is inside; an insertion when its position is inside."""
-    overlapping = []
-    for event in indel_events(read):
-        position, kind, length = event
-        if kind == "DEL":
-            touches = position < end and position + length > start
-        else:
-            touches = start <= position < end
-        if touches:
-            overlapping.append(event)
     return overlapping
 
 
@@ -135,7 +146,7 @@ def count_endpoints(
     contig: str,
     start: int,
     end: int,
-    min_mapq: int,
+    settings: CallerSettings,
     min_count: int,
 ) -> dict[tuple[int, str], int]:
     """Count endpoints in [start, end) on both strands and keep those with at
@@ -156,7 +167,7 @@ def count_endpoints(
             found[key] = count
 
     for read in bam.fetch(contig, start, end):
-        if not is_counted(read, min_mapq):
+        if not is_counted(read, settings.min_mapq):
             continue
         if read.reference_start < previous_start:
             raise ValueError(
@@ -166,14 +177,14 @@ def count_endpoints(
         previous_start = read.reference_start
         while pending_order and pending_order[0][0] < read.reference_start:
             finish(heapq.heappop(pending_order))
-        endpoint = endpoint_position(read)
-        if not start <= endpoint < end:
-            continue
-        key = (endpoint, strand_of(read))
-        if key not in pending:
-            pending[key] = 0
-            heapq.heappush(pending_order, key)
-        pending[key] += 1
+        for read_end in read_ends(read, settings):
+            if not start <= read_end.position < end:
+                continue
+            key = (read_end.position, read_end.strand)
+            if key not in pending:
+                pending[key] = 0
+                heapq.heappush(pending_order, key)
+            pending[key] += 1
     while pending_order:
         finish(heapq.heappop(pending_order))
     return found
@@ -220,13 +231,17 @@ def measure_site(
     contig: str,
     position: int,
     strand: str,
-    window: int,
-    min_mapq: int,
+    settings: CallerSettings,
 ) -> SiteMetrics:
     """Measure endpoint support at `position` and artifact evidence within
-    `window` bases of it."""
-    start = max(0, position - window)
-    end = position + window + 1
+    `cleavage_artifact_window` bases of it.
+
+    Depth counts reads covering `position` that can give endpoints on
+    `strand`; the clip metric uses the clip on the end that forms the endpoint.
+    """
+    min_mapq = settings.min_mapq
+    start = max(0, position - settings.cleavage_artifact_window)
+    end = position + settings.cleavage_artifact_window + 1
     endpoint_reads = []
     local_mapqs: list[int] = []
     local_nms: list[float] = []
@@ -238,9 +253,10 @@ def measure_site(
     for read in bam.fetch(contig, start, end):
         if read.is_unmapped or read.is_qcfail:
             continue
-        ends_here = strand_of(read) == strand and endpoint_position(read) == position
+        ends = read_ends(read, settings)
+        this_end = next((e for e in ends if e.position == position and e.strand == strand), None)
         if read.is_secondary or read.is_supplementary:
-            if read.mapping_quality >= min_mapq and ends_here:
+            if read.mapping_quality >= min_mapq and this_end is not None:
                 secondary_endpoint_count += 1
             continue
         if not is_counted(read, min_mapq):
@@ -248,18 +264,19 @@ def measure_site(
         local_mapqs.append(read.mapping_quality)
         if read.has_tag("NM"):
             local_nms.append(float(read.get_tag("NM")))
-        if strand_of(read) == strand and read.reference_start <= position < read.reference_end:
+        can_end_here = any(e.strand == strand for e in ends)
+        if can_end_here and read.reference_start <= position < read.reference_end:
             strand_depth += 1
-        if ends_here:
-            endpoint_reads.append(read)
+        if this_end is not None:
+            endpoint_reads.append((read, this_end))
         nearby = indels_overlapping(read, start, end)
         if nearby:
             indel_counts.update(nearby)
             indel_reads.add((read.query_name or "", read.flag, read.reference_start))
 
-    support_mapqs = [read.mapping_quality for read in endpoint_reads]
-    support_nms = [float(read.get_tag("NM")) for read in endpoint_reads if read.has_tag("NM")]
-    softclipped = sum(1 for read in endpoint_reads if five_prime_clip_length(read) > 0)
+    support_mapqs = [read.mapping_quality for read, _end in endpoint_reads]
+    support_nms = [float(read.get_tag("NM")) for read, _end in endpoint_reads if read.has_tag("NM")]
+    softclipped = sum(1 for read, read_end in endpoint_reads if end_clip_length(read, read_end.at_start) > 0)
     indel_position, indel_type, indel_length = None, "", 0
     if indel_counts:
         (indel_position, indel_type, indel_length), _count = indel_counts.most_common(1)[0]
@@ -353,7 +370,7 @@ class RgenCounts(NamedTuple):
     depth: int
 
 
-def rgen_counts(bam: pysam.AlignmentFile, contig: str, position: int, min_mapq: int) -> RgenCounts:
+def rgen_counts(bam: pysam.AlignmentFile, contig: str, position: int, settings: CallerSettings) -> RgenCounts:
     """Endpoint counts and unstranded depth at one base, using the standalone
     RGEN v1.0 read filter, which keeps supplementary alignments."""
     forward = reverse = depth = 0
@@ -363,17 +380,28 @@ def rgen_counts(bam: pysam.AlignmentFile, contig: str, position: int, min_mapq: 
             or read.is_secondary
             or read.is_qcfail
             or read.is_duplicate
-            or read.mapping_quality < min_mapq
+            or read.mapping_quality < settings.min_mapq
         ):
             continue
         if read.reference_end is None or not read.reference_start <= position < read.reference_end:
             continue
         depth += 1
-        if read.is_reverse:
-            reverse += int(read.reference_end - 1 == position)
-        else:
-            forward += int(read.reference_start == position)
+        for read_end in read_ends(read, settings):
+            if read_end.position == position:
+                forward += int(read_end.strand == "+")
+                reverse += int(read_end.strand == "-")
     return RgenCounts(forward, reverse, depth)
+
+
+def reads_covering_either(bam: pysam.AlignmentFile, contig: str, first: int, second: int, min_mapq: int) -> int:
+    """Counted reads covering `first`, `second`, or both, each counted once."""
+    count = 0
+    for read in bam.fetch(contig, min(first, second), max(first, second) + 1):
+        if is_counted(read, min_mapq) and any(
+            read.reference_start <= position < read.reference_end for position in (first, second)
+        ):
+            count += 1
+    return count
 
 
 def float32(value: float) -> float:

@@ -19,11 +19,20 @@ Count, depth, fraction, and pair-score cutoffs are strict `>`.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import pysam
 
-from .bam import SiteMetrics, combine, count_endpoints, measure_site, rgen_counts, rgen_score
+from .bam import (
+    SiteMetrics,
+    combine,
+    count_endpoints,
+    measure_site,
+    ratio,
+    reads_covering_either,
+    rgen_counts,
+    rgen_score,
+)
 from .output import artifact_columns
 from .regions import Blacklist, OwnedInterval, callable_segments, merge_segments
 from .settings import CallerSettings
@@ -69,31 +78,34 @@ def endpoint_records(
         for start, end in scan_ranges:
             for segment_start, segment_end in callable_segments(contig, start, end, blacklist):
                 endpoints.update(
-                    count_endpoints(
-                        bam, contig, segment_start, segment_end,
-                        settings.digenome_min_mapq, scan_minimum,
-                    )
+                    count_endpoints(bam, contig, segment_start, segment_end, settings, scan_minimum)
                 )
         forward = sorted(position for position, strand in endpoints if strand == "+")
         reverse = sorted(position for position, strand in endpoints if strand == "-")
         for position, strand in sorted(endpoints):
             if not any(interval.owns(contig, position) for interval in owned):
                 continue
-            if not has_partner(position, strand, forward, reverse, settings):
+            partners = partner_positions(position, strand, forward, reverse, settings)
+            if not partners:
                 continue
             records.append(
-                endpoint_record(bam, control_bam, vcf, settings, blacklist, contig, position, strand, rgen_caches)
+                endpoint_record(
+                    bam, control_bam, vcf, settings, blacklist, contig, position, strand, partners, rgen_caches
+                )
             )
     return records
 
 
-def has_partner(position: int, strand: str, forward: list[int], reverse: list[int], settings: CallerSettings) -> bool:
+def partner_positions(
+    position: int, strand: str, forward: list[int], reverse: list[int], settings: CallerSettings
+) -> list[int]:
+    """Opposite-strand endpoints within the pair window of this one."""
     overhang, window = settings.digenome_overhang, settings.digenome_pair_window
     if strand == "+":
-        low, high, partners = position - overhang - window, position - overhang + window, reverse
+        low, high, others = position - overhang - window, position - overhang + window, reverse
     else:
-        low, high, partners = position + overhang - window, position + overhang + window, forward
-    return bisect_right(partners, high) > bisect_left(partners, low)
+        low, high, others = position + overhang - window, position + overhang + window, forward
+    return others[bisect_left(others, low):bisect_right(others, high)]
 
 
 def endpoint_record(
@@ -105,23 +117,33 @@ def endpoint_record(
     contig: str,
     position: int,
     strand: str,
+    partners: list[int],
     rgen_caches: tuple[dict, dict],
 ) -> dict:
-    window, min_mapq = settings.cleavage_artifact_window, settings.digenome_min_mapq
     record = {
         "contig": contig,
         "position_0based": position,
         "strand": strand,
-        "metrics": asdict(measure_site(bam, contig, position, strand, window, min_mapq)),
+        "metrics": asdict(measure_site(bam, contig, position, strand, settings)),
         "control_metrics": None,
-        "known_indels": known_indels(vcf, contig, [position], window),
+        "known_indels": known_indels(vcf, contig, [position], settings.cleavage_artifact_window),
         "rgen_score": None,
         "control_rgen_score": None,
+        "pair_depths": {},
     }
     if control_bam is not None:
-        record["control_metrics"] = asdict(
-            measure_site(control_bam, contig, position, strand, window, min_mapq)
-        )
+        record["control_metrics"] = asdict(measure_site(control_bam, contig, position, strand, settings))
+    # A long read spanning the cut covers both endpoints of a pair, so the pair's
+    # combined depth is measured here, per partner, with each read counted once.
+    if settings.long_reads and strand == "+":
+        record["pair_depths"] = {
+            str(partner): [
+                reads_covering_either(bam, contig, position, partner, settings.min_mapq),
+                None if control_bam is None
+                else reads_covering_either(control_bam, contig, position, partner, settings.min_mapq),
+            ]
+            for partner in partners
+        }
     # The RGEN score depends only on the forward endpoint, so it is computed
     # here rather than for each candidate pair.
     if strand == "+":
@@ -149,7 +171,7 @@ def rgen_score_at(
         if blacklist is not None and blacklist.contains(contig, position):
             return None
         if (contig, position) not in cache:
-            cache[contig, position] = rgen_counts(bam, contig, position, settings.digenome_min_mapq)
+            cache[contig, position] = rgen_counts(bam, contig, position, settings)
         return cache[contig, position]
 
     return rgen_score(counts_at, forward_position, settings.digenome_overhang)
@@ -245,6 +267,10 @@ def pair_row(
 ) -> dict:
     forward, reverse = candidate.forward_metrics, candidate.reverse_metrics
     combined = combine(forward, reverse)
+    control_depth = None
+    if settings.long_reads:
+        treated_depth, control_depth = forward_record["pair_depths"][str(candidate.reverse_position)]
+        combined = counted_once(combined, treated_depth)
     known = sorted(set(forward_record["known_indels"]) | set(reverse_record["known_indels"]))
     return {
         "sample": sample,
@@ -266,19 +292,28 @@ def pair_row(
         "combined_depth": combined.strand_depth,
         "combined_fraction": combined.endpoint_fraction,
         **artifact_columns(combined, known),
-        **pair_control_columns(forward_record, reverse_record, combined, settings, control_sample),
+        **pair_control_columns(forward_record, reverse_record, combined, control_depth, settings, control_sample),
         "caller_filter_reasons": candidate.caller_filter_reasons,
     }
+
+
+def counted_once(combined: SiteMetrics, depth: int) -> SiteMetrics:
+    """Pooled long-read metrics with the combined depth replaced by `depth`, the
+    reads covering either endpoint each counted once. Summing the two sides'
+    depths would count every spanning read twice."""
+    return replace(combined, strand_depth=depth, endpoint_fraction=ratio(combined.endpoint_count, depth))
 
 
 def pair_control_columns(
     forward_record: dict,
     reverse_record: dict,
     treated: SiteMetrics,
+    control_depth: int | None,
     settings: CallerSettings,
     control_sample: str,
 ) -> dict:
-    """Both endpoints measured in the matched control, if there is one."""
+    """Both endpoints measured in the matched control, if there is one.
+    `control_depth` is the long-read combined depth (see counted_once)."""
     if forward_record["control_metrics"] is None:
         return {
             "control_sample": "",
@@ -301,6 +336,8 @@ def pair_control_columns(
     forward = SiteMetrics(**forward_record["control_metrics"])
     reverse = SiteMetrics(**reverse_record["control_metrics"])
     control = combine(forward, reverse)
+    if control_depth is not None:
+        control = counted_once(control, control_depth)
     status, fold, p_value = compare_to_control(
         treated.endpoint_count, treated.strand_depth,
         control.endpoint_count, control.strand_depth,

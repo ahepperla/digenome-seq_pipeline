@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pysam
 
-from .bam import SiteMetrics, count_endpoints, endpoint_position, is_counted, measure_site, strand_of
+from .bam import SiteMetrics, count_endpoints, is_counted, measure_site, read_ends
 from .output import artifact_columns, one_based
 from .regions import Blacklist, OwnedInterval, callable_segments
 from .settings import CallerSettings
@@ -39,8 +39,7 @@ def call_chunk(
     for interval in intervals:
         for start, end in callable_segments(interval.contig, interval.start, interval.end, blacklist):
             endpoints = count_endpoints(
-                bam, interval.contig, start, end,
-                settings.ndigenome_min_mapq, settings.ndigenome_min_count,
+                bam, interval.contig, start, end, settings, settings.ndigenome_min_count
             )
             candidate_count += len(endpoints)
             for position, strand in sorted(endpoints):
@@ -65,8 +64,7 @@ def call_endpoint(
     sample: str,
     control_sample: str,
 ) -> dict | None:
-    window = settings.cleavage_artifact_window
-    metrics = measure_site(bam, contig, position, strand, window, settings.ndigenome_min_mapq)
+    metrics = measure_site(bam, contig, position, strand, settings)
     if metrics.endpoint_fraction < settings.ndigenome_min_fraction:
         return None
     opposite_position, opposite = strongest_opposite(bam, contig, position, strand, settings, blacklist)
@@ -87,7 +85,7 @@ def call_endpoint(
         "opposite_count": opposite.endpoint_count,
         "opposite_depth": opposite.strand_depth,
         "opposite_fraction": opposite.endpoint_fraction,
-        **artifact_columns(metrics, known_indels(vcf, contig, nearby_positions, window)),
+        **artifact_columns(metrics, known_indels(vcf, contig, nearby_positions, settings.cleavage_artifact_window)),
         **control_columns(control_bam, control_sample, contig, position, strand, metrics, settings),
     }
 
@@ -127,26 +125,24 @@ def strongest_opposite(
     fraction, closeness, then lower coordinate. Blacklisted endpoints are
     ignored. Returns (None, empty metrics) when there is none."""
     opposite_strand = "-" if strand == "+" else "+"
-    min_mapq = settings.ndigenome_min_mapq
     start = max(0, position - settings.ndigenome_opposite_window)
     end = position + settings.ndigenome_opposite_window + 1
 
     candidates = set()
     for read in bam.fetch(contig, start, end):
-        if not is_counted(read, min_mapq) or strand_of(read) != opposite_strand:
+        if not is_counted(read, settings.min_mapq):
             continue
-        endpoint = endpoint_position(read)
-        if blacklist is not None and blacklist.contains(contig, endpoint):
-            continue
-        if start <= endpoint < end:
-            candidates.add(endpoint)
+        for read_end in read_ends(read, settings):
+            if read_end.strand != opposite_strand:
+                continue
+            if blacklist is not None and blacklist.contains(contig, read_end.position):
+                continue
+            if start <= read_end.position < end:
+                candidates.add(read_end.position)
 
     best = None
     for candidate in sorted(candidates):
-        metrics = measure_site(
-            bam, contig, candidate, opposite_strand,
-            settings.cleavage_artifact_window, min_mapq,
-        )
+        metrics = measure_site(bam, contig, candidate, opposite_strand, settings)
         rank = (
             passes_primary(metrics, settings),
             passes_ambiguous(metrics, settings),
@@ -183,10 +179,7 @@ def control_columns(
             "control_fisher_p": None,
             "control_fisher_q": None,
         }
-    control = measure_site(
-        control_bam, contig, position, strand,
-        settings.cleavage_artifact_window, settings.ndigenome_min_mapq,
-    )
+    control = measure_site(control_bam, contig, position, strand, settings)
     status, fold, p_value = compare_to_control(
         treated.endpoint_count, treated.strand_depth,
         control.endpoint_count, control.strand_depth,

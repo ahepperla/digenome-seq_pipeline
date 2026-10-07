@@ -8,12 +8,12 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from helpers import make_read, reverse_read_ending_at, forward_background, write_bam  # noqa: E402
+from helpers import make_read, make_settings, reverse_read_ending_at, forward_background, write_bam  # noqa: E402
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from cleavage.bam import (  # noqa: E402
-    endpoint_position,
-    five_prime_clip_length,
+    ReadEnd,
+    end_clip_length,
+    read_ends,
     count_endpoints,
     measure_site,
     SiteMetrics,
@@ -24,24 +24,28 @@ from cleavage.bam import (  # noqa: E402
 )
 
 
+SHORT = make_settings("ndigenome")  # short reads, MAPQ >= 1, 10 bp artifact window
+
+
 class EndpointCoordinatesTests(unittest.TestCase):
     def test_forward_read_endpoint_is_start_position(self) -> None:
         read = make_read("forward", 100)
-        self.assertEqual(endpoint_position(read), 100)
+        self.assertEqual(read_ends(read, SHORT), [ReadEnd(100, "+", True)])
 
     def test_reverse_read_endpoint_is_end_minus_one(self) -> None:
         read = reverse_read_ending_at("reverse", 100)
-        self.assertEqual(endpoint_position(read), 100)
+        self.assertEqual(read_ends(read, SHORT), [ReadEnd(100, "-", False)])
 
     def test_complex_cigar_forward_endpoint(self) -> None:
         read = make_read("complex_fwd", 100, cigar=[(4, 5), (0, 45)])
-        self.assertEqual(endpoint_position(read), 100)
-        self.assertEqual(five_prime_clip_length(read), 5)
+        self.assertEqual(read_ends(read, SHORT), [ReadEnd(100, "+", True)])
+        self.assertEqual(end_clip_length(read, at_start=True), 5)
 
     def test_complex_cigar_reverse_endpoint(self) -> None:
         read = make_read("complex_rev", 100, reverse=True, cigar=[(5, 2), (0, 20), (2, 3), (0, 20), (4, 5)])
-        self.assertEqual(endpoint_position(read), 142)
-        self.assertEqual(five_prime_clip_length(read), 5)
+        self.assertEqual(read_ends(read, SHORT), [ReadEnd(142, "-", False)])
+        self.assertEqual(end_clip_length(read, at_start=False), 5)
+        self.assertEqual(end_clip_length(read, at_start=True), 2)
 
 
 class CountEndpointsTests(unittest.TestCase):
@@ -61,7 +65,7 @@ class CountEndpointsTests(unittest.TestCase):
         ]
         bam_path = write_bam(self.tmp / "count_test.bam", [("chr1", 2000)], reads)
         with __import__("pysam").AlignmentFile(str(bam_path), "rb") as bam:
-            counts = count_endpoints(bam, "chr1", 0, 2000, min_mapq=1, min_count=3)
+            counts = count_endpoints(bam, "chr1", 0, 2000, SHORT, min_count=3)
         self.assertEqual(counts, {(100, "+"): 3, (300, "-"): 3})
 
     def test_count_endpoints_filters_below_min_count(self) -> None:
@@ -73,7 +77,7 @@ class CountEndpointsTests(unittest.TestCase):
         ]
         bam_path = write_bam(self.tmp / "min_count_test.bam", [("chr1", 2000)], reads)
         with __import__("pysam").AlignmentFile(str(bam_path), "rb") as bam:
-            counts = count_endpoints(bam, "chr1", 0, 2000, min_mapq=1, min_count=3)
+            counts = count_endpoints(bam, "chr1", 0, 2000, SHORT, min_count=3)
         self.assertEqual(counts, {(300, "-"): 3})
 
     def test_count_endpoints_filters_by_flags(self) -> None:
@@ -84,7 +88,7 @@ class CountEndpointsTests(unittest.TestCase):
         reads += [make_read(f"qcfail_{i}", 700, mapq=1, flag=512) for i in range(3)]
         bam_path = write_bam(self.tmp / "flags_test.bam", [("chr1", 2000)], reads)
         with __import__("pysam").AlignmentFile(str(bam_path), "rb") as bam:
-            counts = count_endpoints(bam, "chr1", 0, 2000, min_mapq=1, min_count=1)
+            counts = count_endpoints(bam, "chr1", 0, 2000, SHORT, min_count=1)
         self.assertEqual(counts, {(100, "+"): 1})
 
     def test_count_endpoints_filters_by_mapq(self) -> None:
@@ -92,7 +96,7 @@ class CountEndpointsTests(unittest.TestCase):
         reads += [make_read(f"low_mapq_{i}", 500, mapq=0) for i in range(3)]
         bam_path = write_bam(self.tmp / "mapq_test.bam", [("chr1", 2000)], reads)
         with __import__("pysam").AlignmentFile(str(bam_path), "rb") as bam:
-            counts = count_endpoints(bam, "chr1", 0, 2000, min_mapq=1, min_count=1)
+            counts = count_endpoints(bam, "chr1", 0, 2000, SHORT, min_count=1)
         self.assertEqual(counts, {(100, "+"): 1})
 
     def test_count_endpoints_respects_range(self) -> None:
@@ -104,7 +108,7 @@ class CountEndpointsTests(unittest.TestCase):
         ]
         bam_path = write_bam(self.tmp / "range_test.bam", [("chr1", 2000)], reads)
         with __import__("pysam").AlignmentFile(str(bam_path), "rb") as bam:
-            counts = count_endpoints(bam, "chr1", 200, 400, min_mapq=1, min_count=1)
+            counts = count_endpoints(bam, "chr1", 200, 400, SHORT, min_count=1)
         self.assertEqual(counts, {(300, "-"): 3})
         self.assertNotIn((100, "+"), counts)
 
@@ -121,7 +125,7 @@ class MeasureSiteTests(unittest.TestCase):
         read = make_read("deletion_read", 280, cigar=[(0, 5), (2, 5), (0, 30)])
         bam_path = write_bam(self.tmp / "deletion_test.bam", [("chr1", 2000)], [read])
         with __import__("pysam").AlignmentFile(str(bam_path), "rb") as bam:
-            metrics = measure_site(bam, "chr1", 300, "+", window=10, min_mapq=1)
+            metrics = measure_site(bam, "chr1", 300, "+", SHORT)
         self.assertEqual(metrics.indel_read_count, 0)
         self.assertIsNone(metrics.indel_position)
 
@@ -132,7 +136,7 @@ class MeasureSiteTests(unittest.TestCase):
         reads += forward_background("bg", 100, 4, mapq=60)
         bam_path = write_bam(self.tmp / "measure_test.bam", [("chr1", 2000)], reads)
         with __import__("pysam").AlignmentFile(str(bam_path), "rb") as bam:
-            metrics = measure_site(bam, "chr1", 100, "+", window=10, min_mapq=1)
+            metrics = measure_site(bam, "chr1", 100, "+", SHORT)
         self.assertEqual(metrics.endpoint_count, 6)
         self.assertEqual(metrics.strand_depth, 10)
         self.assertAlmostEqual(metrics.endpoint_fraction, 0.6, places=5)
@@ -147,7 +151,7 @@ class MeasureSiteTests(unittest.TestCase):
         reads += forward_background("bg", 100, 4, mapq=60)
         bam_path = write_bam(self.tmp / "secondary_test.bam", [("chr1", 2000)], reads)
         with __import__("pysam").AlignmentFile(str(bam_path), "rb") as bam:
-            metrics = measure_site(bam, "chr1", 100, "+", window=10, min_mapq=1)
+            metrics = measure_site(bam, "chr1", 100, "+", SHORT)
         self.assertEqual(metrics.endpoint_count, 6)
         self.assertEqual(metrics.secondary_endpoint_count, 2)
 
@@ -226,7 +230,7 @@ class RgenCountsTests(unittest.TestCase):
         ]
         bam_path = write_bam(self.tmp / "rgen_test.bam", [("chr1", 2000)], reads)
         with __import__("pysam").AlignmentFile(str(bam_path), "rb") as bam:
-            counts = rgen_counts(bam, "chr1", 900, min_mapq=1)
+            counts = rgen_counts(bam, "chr1", 900, make_settings("digenome"))
         self.assertEqual(counts.forward_endpoints, 2)
         self.assertEqual(counts.reverse_endpoints, 0)
         self.assertEqual(counts.depth, 2)

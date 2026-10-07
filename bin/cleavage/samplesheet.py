@@ -18,9 +18,8 @@ import re
 from pathlib import Path
 
 SHORT_READ_REQUIRED = ["sample", "fastq_1", "fastq_2"]
-SHORT_READ_OPTIONAL = ["control", "variant_vcf"]
 LONG_READ_REQUIRED = ["sample", "bam"]
-LONG_READ_OPTIONAL = ["control", "variant_vcf"]
+OPTIONAL_COLUMNS = ["control", "variant_vcf"]
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 FASTQ_SUFFIX = re.compile(r"\.(fastq|fq)\.gz$", re.IGNORECASE)
@@ -34,10 +33,9 @@ def validate_samplesheet(input_csv: Path, analysis: str, long_reads: bool = Fals
         raise ValueError(f"Unknown analysis '{analysis}'. Expected digenome or ndigenome")
     problems: list[str] = []
     samples: dict[str, dict] = {}
-    fastq_owners: dict[str, str] = {}
-    bam_owners: dict[str, str] = {}
-    for line_number, row in read_rows(Path(input_csv), long_reads=long_reads):
-        check_row(line_number, row, analysis, samples, fastq_owners, bam_owners, problems, long_reads=long_reads)
+    file_owners: dict[str, str] = {}
+    for line_number, row in read_rows(Path(input_csv), long_reads):
+        check_row(line_number, row, analysis, long_reads, samples, file_owners, problems)
     if not samples:
         problems.append("Samplesheet contains no usable data rows")
     problems += control_problems(samples)
@@ -55,7 +53,7 @@ def write_samples_json(samples: list[dict], output_json: Path) -> None:
     Path(output_json).write_text(json.dumps(samples, indent=2) + "\n")
 
 
-def read_rows(input_csv: Path, long_reads: bool = False) -> list[tuple[int, dict[str, str]]]:
+def read_rows(input_csv: Path, long_reads: bool) -> list[tuple[int, dict[str, str]]]:
     """Read the sheet after checking its header. Values are stripped; the
     header is line 1."""
     if not input_csv.is_file():
@@ -63,7 +61,7 @@ def read_rows(input_csv: Path, long_reads: bool = False) -> list[tuple[int, dict
     with input_csv.open(newline="") as handle:
         reader = csv.reader(handle)
         header = [name.strip() for name in next(reader, [])]
-        check_header(header, long_reads=long_reads)
+        check_header(header, long_reads)
         return [
             (line_number, {name: value.strip() for name, value in zip(header, values)})
             for line_number, values in enumerate(reader, start=2)
@@ -71,33 +69,24 @@ def read_rows(input_csv: Path, long_reads: bool = False) -> list[tuple[int, dict
         ]
 
 
-def check_header(header: list[str], long_reads: bool = False) -> None:
+def check_header(header: list[str], long_reads: bool) -> None:
     if not header:
         raise ValueError("Samplesheet is empty or missing a header row")
     if len(set(header)) != len(header):
         raise ValueError("Samplesheet contains duplicate column names")
-
-    if long_reads:
-        required_columns = LONG_READ_REQUIRED
-        optional_columns = LONG_READ_OPTIONAL
-        # Check for fastq columns first
-        if "fastq_1" in header or "fastq_2" in header:
-            raise ValueError(
-                "With --long_reads the samplesheet lists aligned BAMs in a bam column, not fastq_1/fastq_2"
-            )
-    else:
-        required_columns = SHORT_READ_REQUIRED
-        optional_columns = SHORT_READ_OPTIONAL
-        # Check for bam column in short-read mode
-        if "bam" in header:
-            raise ValueError("The bam column needs --long_reads")
-
-    unknown = sorted(set(header) - set(required_columns + optional_columns))
+    if long_reads and ("fastq_1" in header or "fastq_2" in header):
+        raise ValueError(
+            "With --long_reads the samplesheet lists aligned BAMs in a bam column, not fastq_1/fastq_2"
+        )
+    if not long_reads and "bam" in header:
+        raise ValueError("The bam column needs --long_reads")
+    required_columns = LONG_READ_REQUIRED if long_reads else SHORT_READ_REQUIRED
+    allowed = required_columns + OPTIONAL_COLUMNS
+    unknown = sorted(set(header) - set(allowed))
     if unknown:
-        allowed_cols = required_columns + optional_columns
         raise ValueError(
             f"Samplesheet contains unknown column(s): {', '.join(unknown)}. "
-            f"Allowed columns are: {', '.join(allowed_cols)}"
+            f"Allowed columns are: {', '.join(allowed)}"
         )
     missing = [name for name in required_columns if name not in header]
     if missing:
@@ -108,11 +97,10 @@ def check_row(
     line_number: int,
     row: dict[str, str],
     analysis: str,
+    long_reads: bool,
     samples: dict[str, dict],
-    fastq_owners: dict[str, str],
-    bam_owners: dict[str, str],
+    file_owners: dict[str, str],
     problems: list[str],
-    long_reads: bool = False,
 ) -> None:
     """Check one row and add it to `samples` (keyed by sample name)."""
     sample, control = row.get("sample", ""), row.get("control", "")
@@ -129,72 +117,57 @@ def check_row(
                 f"{label} '{name}' contains unsupported characters. "
                 "Use only letters, numbers, dots, underscores, and hyphens."
             )
-
     vcf, index = check_vcf(row.get("variant_vcf", ""), problem)
-
+    metadata = {"control": control, "variant_vcf": vcf, "variant_index": index}
+    owner = f"line {line_number} ({sample})"
     if long_reads:
-        bam = row.get("bam", "")
-        if not bam:
-            problem("bam is blank")
-            return
-
-        bam_path = check_bam(bam, f"line {line_number} ({sample})", bam_owners, problem)
-
-        if sample in samples:
-            problem(f"sample '{sample}' has more than one row; a long-read sample is one BAM")
-            return
-
-        record = {
-            "sample": sample,
-            "bam": bam_path,
-            "bam_index": "",
-            "control": control,
-            "variant_vcf": vcf,
-            "variant_index": index,
-        }
-
-        # Find the index file
-        for suffix in (".bai", ".csi"):
-            if Path(bam_path + suffix).is_file():
-                record["bam_index"] = bam_path + suffix
-                break
-        if not record["bam_index"]:
-            problem(f"bam is not indexed with .bai or .csi: {bam_path}")
-
-        samples[sample] = record
+        add_long_read_row(row, sample, metadata, owner, samples, file_owners, problem)
     else:
-        fastq_1, fastq_2 = row.get("fastq_1", ""), row.get("fastq_2", "")
-        if not fastq_1:
-            problem("fastq_1 is blank")
-            return
-        single_end = not fastq_2
-        if analysis == "ndigenome" and single_end:
-            problem("nDigenome requires paired-end data")
-
-        fastqs = {}
-        for label, path in (("fastq_1", fastq_1), ("fastq_2", fastq_2)):
-            if path:
-                fastqs[label] = check_fastq(label, path, f"line {line_number} ({sample})", fastq_owners, problem)
-
-        record = samples.setdefault(sample, {
-            "sample": sample,
-            "single_end": single_end,
-            "fastq_1": [],
-            "fastq_2": [],
-            "control": control,
-            "variant_vcf": vcf,
-            "variant_index": index,
-        })
-        if record["single_end"] != single_end:
-            problem(f"sample '{sample}' mixes single-end and paired-end rows")
-        if (record["control"], record["variant_vcf"], record["variant_index"]) != (control, vcf, index):
-            problem(f"sample '{sample}' has inconsistent control or variant_vcf values across lanes")
-        record["fastq_1"].append(fastqs["fastq_1"])
-        if "fastq_2" in fastqs:
-            record["fastq_2"].append(fastqs["fastq_2"])
+        add_short_read_row(row, sample, metadata, analysis, owner, samples, file_owners, problem)
 
 
-def check_fastq(label: str, path: str, owner: str, fastq_owners: dict[str, str], problem) -> str:
+def add_long_read_row(row, sample, metadata, owner, samples, file_owners, problem) -> None:
+    """A long-read sample is one aligned BAM, so it has exactly one row."""
+    if not row.get("bam"):
+        problem("bam is blank")
+        return
+    bam, bam_index = check_bam(row["bam"], owner, file_owners, problem)
+    if sample in samples:
+        problem(f"sample '{sample}' has more than one row; a long-read sample is one BAM")
+        return
+    samples[sample] = {"sample": sample, "bam": bam, "bam_index": bam_index, **metadata}
+
+
+def add_short_read_row(row, sample, metadata, analysis, owner, samples, file_owners, problem) -> None:
+    """One FASTQ pair, or one single-end FASTQ; rows of one sample are its lanes."""
+    fastq_1, fastq_2 = row.get("fastq_1", ""), row.get("fastq_2", "")
+    if not fastq_1:
+        problem("fastq_1 is blank")
+        return
+    single_end = not fastq_2
+    if analysis == "ndigenome" and single_end:
+        problem("nDigenome requires paired-end data")
+    fastqs = {}
+    for label, path in (("fastq_1", fastq_1), ("fastq_2", fastq_2)):
+        if path:
+            fastqs[label] = check_fastq(label, path, owner, file_owners, problem)
+    record = samples.setdefault(sample, {
+        "sample": sample,
+        "single_end": single_end,
+        "fastq_1": [],
+        "fastq_2": [],
+        **metadata,
+    })
+    if record["single_end"] != single_end:
+        problem(f"sample '{sample}' mixes single-end and paired-end rows")
+    if any(record[key] != value for key, value in metadata.items()):
+        problem(f"sample '{sample}' has inconsistent control or variant_vcf values across lanes")
+    record["fastq_1"].append(fastqs["fastq_1"])
+    if "fastq_2" in fastqs:
+        record["fastq_2"].append(fastqs["fastq_2"])
+
+
+def check_fastq(label: str, path: str, owner: str, file_owners: dict[str, str], problem) -> str:
     """Check one FASTQ path and return it resolved. A file may be used once
     in the whole sheet, which also rejects fastq_1 == fastq_2."""
     if not FASTQ_SUFFIX.search(path):
@@ -202,26 +175,31 @@ def check_fastq(label: str, path: str, owner: str, fastq_owners: dict[str, str],
     if not Path(path).expanduser().is_file():
         problem(f"{label} file does not exist: {path}")
     resolved = str(Path(path).expanduser().resolve())
-    if resolved in fastq_owners:
-        problem(f"{label} reuses FASTQ '{resolved}' already used on {fastq_owners[resolved]}")
+    if resolved in file_owners:
+        problem(f"{label} reuses FASTQ '{resolved}' already used on {file_owners[resolved]}")
     else:
-        fastq_owners[resolved] = f"{owner} as {label}"
+        file_owners[resolved] = f"{owner} as {label}"
     return resolved
 
 
-def check_bam(path: str, owner: str, bam_owners: dict[str, str], problem) -> str:
-    """Check one BAM path and return it resolved. A file may be used once
-    in the whole sheet."""
+def check_bam(path: str, owner: str, file_owners: dict[str, str], problem) -> tuple[str, str]:
+    """Return the resolved BAM and its .bai or .csi index. A file may be used
+    once in the whole sheet. Sort order is checked when the caller opens it."""
     if not BAM_SUFFIX.search(path):
         problem(f"bam must end with .bam: {path}")
-    if not Path(path).expanduser().is_file():
-        problem(f"bam file does not exist: {path}")
     resolved = str(Path(path).expanduser().resolve())
-    if resolved in bam_owners:
-        problem(f"bam reuses BAM '{resolved}' already used on {bam_owners[resolved]}")
+    if resolved in file_owners:
+        problem(f"bam reuses BAM '{resolved}' already used on {file_owners[resolved]}")
     else:
-        bam_owners[resolved] = owner
-    return resolved
+        file_owners[resolved] = owner
+    if not Path(resolved).is_file():
+        problem(f"bam file does not exist: {path}")
+        return resolved, ""
+    for suffix in (".bai", ".csi"):
+        if Path(resolved + suffix).is_file():
+            return resolved, resolved + suffix
+    problem(f"bam is not indexed with .bai or .csi: {resolved}")
+    return resolved, ""
 
 
 def check_vcf(path: str, problem) -> tuple[str, str]:
