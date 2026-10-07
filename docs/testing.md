@@ -34,14 +34,15 @@ production data. It runs `bash -n` on the shell scripts and every unittest:
 - **Workflow** (`test_workflow.py`): parameter names and defaults agree across
   `nextflow.config`, `nextflow_schema.json`, and `parameters.md`; container
   provenance; the smoke fixture. With `nextflow` installed it also runs
-  `nextflow lint` and stub runs of both modes and of `--long_reads`
-  (`-stub-run`, no tools needed), checking every published file, the
-  processes that ran, one chunk task per chunk per called sample, that
-  controls are not called, and the `--keep_multimappers` and `--long_reads`
-  settings. The Digenome run names its genome by an alias in another case.
-  The long-read run has no `--genome`, its treated and control BAMs share a
-  file name, and one BAM is unsorted: only that one goes through SORT_BAM,
-  and its file is left untouched.
+  `nextflow lint` and stub runs of both modes, of a short-read BAM
+  samplesheet, and of `--long_reads` (`-stub-run`, no tools needed), and checks
+  that `--long_reads` refuses a FASTQ samplesheet. The stub runs check every
+  published file, the processes that ran, one chunk task per chunk per called
+  sample, that controls are not called, and the `--keep_multimappers` and
+  `--long_reads` settings. The Digenome FASTQ run names its genome by an alias
+  in another case. The BAM runs have no `--genome`; their treated and control
+  BAMs share a file name, and one BAM is unsorted: only that one goes through
+  SORT_BAM, and its file is left untouched.
 
 The workflow tests use `$NEXTFLOW` if set, else `nextflow` on PATH. Run them
 on Longleaf's version with `NEXTFLOW=nextflow-25.04.7 ./tests/run_tests.sh`.

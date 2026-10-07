@@ -1,8 +1,8 @@
 # Digenome-seq and nDigenome-seq pipeline
 
 Nextflow pipeline that calls nuclease cleavage sites from whole-genome
-sequencing of digested genomic DNA: Illumina reads, or aligned ONT or PacBio
-long reads with `--long_reads`.
+sequencing of digested genomic DNA: Illumina reads, as FASTQs or aligned BAMs,
+or aligned ONT or PacBio long reads with `--long_reads`.
 
 | `--analysis` | Calls | Reads |
 | --- | --- | --- |
@@ -12,8 +12,8 @@ long reads with `--long_reads`.
 Steps: samplesheet check → bwa-mem2 index (shared cache) → fastp → bwa-mem2
 alignment and duplicate marking → cleavage calling in parallel coordinate
 chunks → per-sample finalize (pairing, sample-wide statistics, filters) →
-MultiQC. Long reads arrive aligned, are sorted if they need it, and start at
-cleavage calling. How calls are made is in
+MultiQC. Aligned BAMs skip trimming and alignment, are sorted if they need it,
+and start at cleavage calling. How calls are made is in
 [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md); every parameter is in
 [docs/parameters.md](docs/parameters.md).
 
@@ -75,21 +75,12 @@ Untreated,/data/Untreated_R1.fastq.gz,/data/Untreated_R2.fastq.gz,,
 
 A template is in `assets/samplesheet_template.csv`.
 
-## Long reads
+### Aligned BAMs
 
-`--long_reads` calls ONT or PacBio reads from BAMs you have already aligned,
-for example with minimap2. Trimming, alignment, and the reference cache are
-skipped, and `--genome` isn't needed.
-
-```bash
-nextflow run /path/to/digenome-seq_pipeline \
-  -profile longleaf \
-  --long_reads \
-  --input long_reads.csv \
-  --analysis digenome \
-  --outdir results_long_reads \
-  -work-dir /work/groups/my_lab/long_reads
-```
+Reads you have already aligned can be given as BAMs instead: a `bam` column
+replaces `fastq_1` and `fastq_2`. Trimming, alignment, and the reference cache
+are skipped, and `--genome` isn't needed. One sheet lists either FASTQs or
+BAMs, not both.
 
 ```csv
 sample,bam,control,variant_vcf
@@ -102,12 +93,28 @@ Untreated,/data/Untreated.sorted.bam,,
   is used as is. Any other is sorted and indexed first, into the work
   directory; your file is only read. Index your sorted BAMs to skip that step.
 - Unaligned BAMs, such as raw basecaller output, are rejected.
-- `control` and `variant_vcf` work as they do for short reads.
-- Reads flagged as duplicates are not counted, as with short reads; marking
-  them is up to you.
-- Both aligned ends of each primary read count, and the soft-clip and indel
-  limits become 1.0. [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md#long-reads)
-  shows what cuts and nicks look like in long reads.
+- The BAMs are used as they are: reads flagged as duplicates are not counted,
+  so mark duplicates first (for example with `samtools markdup`) if your
+  aligner didn't. nDigenome still needs paired-end short reads.
+
+## Long reads
+
+`--long_reads` calls ONT or PacBio reads, given as [aligned BAMs](#aligned-bams)
+(for example from minimap2).
+
+```bash
+nextflow run /path/to/digenome-seq_pipeline \
+  -profile longleaf \
+  --long_reads \
+  --input long_reads.csv \
+  --analysis digenome \
+  --outdir results_long_reads \
+  -work-dir /work/groups/my_lab/long_reads
+```
+
+Both aligned ends of each primary read count, and the soft-clip and indel
+limits become 1.0. [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md#long-reads)
+shows what cuts and nicks look like in long reads.
 
 ## Profiles and configuration
 
@@ -151,7 +158,7 @@ primary alignments count (both minimum MAPQs and the support mean-MAPQ filter
 become 0), and turns off fastp's low-complexity filter. Each read still counts
 once, at BWA's primary placement; secondary and supplementary alignments stay
 diagnostic. Support can therefore be split across equivalent repeat copies.
-With `--long_reads` only the MAPQ changes apply, since the BAMs come
+With a samplesheet of BAMs only the MAPQ changes apply, since the reads come
 aligned.
 
 **Blacklist.** `--genome_blacklist` takes 0-based half-open BED rows with the

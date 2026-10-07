@@ -1,28 +1,32 @@
 #!/usr/bin/env nextflow
 /*
  * Digenome-seq (DSB) and nDigenome-seq (SSB) cleavage calling from Illumina
- * WGS, or from aligned long reads with --long_reads.
+ * WGS, as FASTQs or aligned BAMs, or from aligned long reads with --long_reads.
  *
  *   SAMPLESHEET -> PREPARE_INDEX -> FASTP -> ALIGN -> CALL_CHUNK (n per sample)
  *   -> FINALIZE -> MULTIQC
  *
- * Long-read samples are aligned BAMs, so they skip PREPARE_INDEX, FASTP, and
- * ALIGN; SORT_BAM sorts any that aren't coordinate-sorted and indexed. Calling
- * rules live in bin/cleavage/ and docs/cleavage_algorithm.md.
+ * A samplesheet of aligned BAMs skips PREPARE_INDEX, FASTP, and ALIGN; SORT_BAM
+ * sorts any BAM that isn't coordinate-sorted and indexed. Calling rules live in
+ * bin/cleavage/ and docs/cleavage_algorithm.md.
  */
 
 include { validateParameters } from 'plugin/nf-schema'
 
 workflow {
     validateParameters()
-    def genome = params.long_reads ? null : selectedGenome()
+    def bam_input = samplesheetListsBams()
+    if (params.long_reads && !bam_input) {
+        error("--long_reads needs a samplesheet of aligned BAMs, with a bam column")
+    }
+    def genome = bam_input ? null : selectedGenome()
     def settings = callerSettings()
     def settings_json = groovy.json.JsonOutput.toJson(settings)
     writeRunInfo(genome, settings)
 
     def code = files("${projectDir}/bin/cleavage/*.py")
     def samples = SAMPLESHEET(file(params.input), code).splitJson()
-    def aligned = params.long_reads ? LONG_READS(samples) : SHORT_READS(samples, genome)
+    def aligned = bam_input ? FROM_BAMS(samples) : FROM_FASTQS(samples, genome)
 
     // Controls aren't called; each treated sample is called against its named
     // control, or with empty placeholders when it has none.
@@ -54,9 +58,9 @@ workflow {
     MULTIQC(aligned.qc.mix(FINALIZE.out.multiqc).collect())
 }
 
-// Long-read samples are aligned BAMs. The samplesheet check gives an index
+// Aligned BAMs, of short or long reads. The samplesheet check gives an index
 // only for a BAM that is coordinate-sorted and indexed; any other is sorted.
-workflow LONG_READS {
+workflow FROM_BAMS {
     take:
     samples
 
@@ -74,8 +78,8 @@ workflow LONG_READS {
     qc = channel.empty()
 }
 
-// Short reads are trimmed and aligned to --genome; their QC goes to MultiQC.
-workflow SHORT_READS {
+// FASTQs are trimmed and aligned to --genome; their QC goes to MultiQC.
+workflow FROM_FASTQS {
     take:
     samples
     genome
@@ -95,6 +99,13 @@ workflow SHORT_READS {
     qc = FASTP.out.qc.mix(ALIGN.out.qc.flatten())
 }
 
+// Whether the samplesheet lists aligned BAMs (a bam column) rather than FASTQs.
+// SAMPLESHEET checks the sheet in full; this only chooses the workflow's path.
+def samplesheetListsBams() {
+    def header = file(params.input).readLines().find { line -> line.trim() } ?: ''
+    return header.split(',').collect { column -> column.trim() }.contains('bam')
+}
+
 // What every process needs to know about a sample.
 def sampleMeta(record) {
     return [sample: record.sample, control: record.control, is_control: record.is_control]
@@ -105,7 +116,7 @@ def sampleMeta(record) {
 // the run record use its name, so every alias shares one index.
 def selectedGenome() {
     if (!params.genome) {
-        error("--genome is required unless --long_reads is set")
+        error("--genome is required for a samplesheet of FASTQs")
     }
     def matches = params.genomes.findAll { name, genome ->
         ([name] + (genome.aliases ?: [])).any { alias -> alias.toString().equalsIgnoreCase(params.genome.toString()) }
@@ -157,8 +168,8 @@ def callerSettings() {
     ]
 }
 
-// Record what this run used before any task starts. Long reads arrive
-// aligned, so they use no genome or index cache.
+// Record what this run used before any task starts. BAMs arrive aligned, so
+// they use no genome or index cache.
 def writeRunInfo(genome, settings) {
     def info_dir = file("${params.outdir}/pipeline_info")
     info_dir.mkdirs()
@@ -314,7 +325,7 @@ process ALIGN {
     """
 }
 
-// A copy of a long-read BAM, coordinate-sorted and indexed. It stays in the
+// A copy of a given BAM, coordinate-sorted and indexed. It stays in the
 // work directory. The input is staged under input/ so that a BAM already named
 // <sample>.sorted.bam is only read, never overwritten.
 process SORT_BAM {

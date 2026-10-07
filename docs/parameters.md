@@ -26,8 +26,8 @@ and invalid values, and checks that required parameters are supplied.
 
 | Parameter | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
-| `--input` | Path | `null` | Yes | Samplesheet CSV: `sample`, `fastq_1`, `fastq_2`, and optional `control` and `variant_vcf`; with `--long_reads`, `sample`, `bam`, and optional `control` and `variant_vcf`. See README.md for the rules. |
-| `--genome` | String | `null` | Yes, except with `--long_reads` | Name or alias of a genome in params.genomes to align against, in any case (for example GRCh38 or hg38). Long-read BAMs are already aligned, so it isn't needed then. |
+| `--input` | Path | `null` | Yes | Samplesheet CSV: `sample`, `fastq_1`, `fastq_2`, and optional `control` and `variant_vcf`; or, for aligned BAMs (required with `--long_reads`), `sample`, `bam`, and optional `control` and `variant_vcf`. See README.md for the rules. |
+| `--genome` | String | `null` | For a samplesheet of FASTQs | Name or alias of a genome in params.genomes to align against, in any case (for example GRCh38 or hg38). A samplesheet of BAMs is already aligned, so it isn't needed then. |
 | `--analysis` | Choice | `digenome` | No | Calling mode: `digenome` pairs forward and reverse endpoints into DSBs; `ndigenome` calls isolated strand endpoints (SSBs, nicks). One mode applies to the complete run. |
 | `--outdir` | Path | `results` | No | Published results directory. Use a separate one for each run. |
 | `--genome_blacklist` | Path | `null` | No | Optional BED or BED.gz of regions to skip, with BAM contig names and 0-based half-open coordinates. |
@@ -44,7 +44,7 @@ cache and the run record use the name, so a genome's aliases share one index.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--keep_multimappers` | Boolean | `false` | Run bwa-mem2 with `-a`, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement. With `--long_reads` only the MAPQ changes apply. |
+| `--keep_multimappers` | Boolean | `false` | Run bwa-mem2 with `-a`, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement. With a samplesheet of BAMs only the MAPQ changes apply. |
 | `--cleavage_chunks` | Integer | `8` | Coordinate chunks per sample, each called by a one-CPU task. Changes runtime, never results. |
 | `--long_reads` | Boolean | `false` | Call long-read (ONT/PacBio) samples from aligned BAMs given in the samplesheet's `bam` column; trimming and alignment are skipped, and BAMs that aren't coordinate-sorted and indexed are sorted first. Both aligned ends of each read count (see [cleavage_algorithm.md](cleavage_algorithm.md#long-reads)), and `--cleavage_max_softclip_fraction` and `--cleavage_max_indel_fraction` become 1.0 because nanopore reads routinely carry small indels and clipped ends. |
 

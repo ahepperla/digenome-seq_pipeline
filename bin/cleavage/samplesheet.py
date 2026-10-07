@@ -1,13 +1,14 @@
 """Check the input samplesheet and group its rows into one record per sample.
 
-Short-read mode: columns sample, fastq_1, fastq_2 (required); control, variant_vcf (optional).
-Each row is one FASTQ pair, or one single-end FASTQ when fastq_2 is blank.
-Rows that share a sample name are lanes of that sample.
-
-Long-read mode: columns sample, bam (required); control, variant_vcf (optional).
-Each row is one aligned BAM. Each sample must have exactly one row. A BAM that
-is coordinate-sorted with a .bai or .csi index beside it is called as given;
-any other gets an empty bam_index, and the workflow sorts and indexes it.
+The header sets the input type for the whole sheet:
+- FASTQs: columns sample, fastq_1, fastq_2 (required); control, variant_vcf
+  (optional). Each row is one FASTQ pair, or one single-end FASTQ when fastq_2
+  is blank. Rows that share a sample name are lanes of that sample.
+- Aligned BAMs: columns sample, bam (required); control, variant_vcf
+  (optional). Each sample has exactly one row. A BAM that is coordinate-sorted
+  with a .bai or .csi index beside it is called as given; any other gets an
+  empty bam_index, and the workflow sorts and indexes it. Long reads must be
+  given as BAMs.
 
 Every problem in the sheet is reported at once.
 """
@@ -21,8 +22,8 @@ from pathlib import Path
 
 import pysam
 
-SHORT_READ_REQUIRED = ["sample", "fastq_1", "fastq_2"]
-LONG_READ_REQUIRED = ["sample", "bam"]
+FASTQ_REQUIRED = ["sample", "fastq_1", "fastq_2"]
+BAM_REQUIRED = ["sample", "bam"]
 OPTIONAL_COLUMNS = ["control", "variant_vcf"]
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -38,8 +39,9 @@ def validate_samplesheet(input_csv: Path, analysis: str, long_reads: bool = Fals
     problems: list[str] = []
     samples: dict[str, dict] = {}
     file_owners: dict[str, str] = {}
-    for line_number, row in read_rows(Path(input_csv), long_reads):
-        check_row(line_number, row, analysis, long_reads, samples, file_owners, problems)
+    bam_input, rows = read_rows(Path(input_csv), long_reads)
+    for line_number, row in rows:
+        check_row(line_number, row, analysis, bam_input, samples, file_owners, problems)
     if not samples:
         problems.append("Samplesheet contains no usable data rows")
     problems += control_problems(samples)
@@ -57,34 +59,36 @@ def write_samples_json(samples: list[dict], output_json: Path) -> None:
     Path(output_json).write_text(json.dumps(samples, indent=2) + "\n")
 
 
-def read_rows(input_csv: Path, long_reads: bool) -> list[tuple[int, dict[str, str]]]:
-    """Read the sheet after checking its header. Values are stripped; the
-    header is line 1."""
+def read_rows(input_csv: Path, long_reads: bool) -> tuple[bool, list[tuple[int, dict[str, str]]]]:
+    """Read the sheet after checking its header. Returns whether it lists BAMs,
+    and its rows with stripped values; the header is line 1."""
     if not input_csv.is_file():
         raise ValueError(f"Samplesheet does not exist: {input_csv}")
     with input_csv.open(newline="") as handle:
         reader = csv.reader(handle)
         header = [name.strip() for name in next(reader, [])]
-        check_header(header, long_reads)
-        return [
+        bam_input = check_header(header, long_reads)
+        return bam_input, [
             (line_number, {name: value.strip() for name, value in zip(header, values)})
             for line_number, values in enumerate(reader, start=2)
             if any(value.strip() for value in values)
         ]
 
 
-def check_header(header: list[str], long_reads: bool) -> None:
+def check_header(header: list[str], long_reads: bool) -> bool:
+    """Check the columns and return whether the sheet lists BAMs, not FASTQs."""
     if not header:
         raise ValueError("Samplesheet is empty or missing a header row")
     if len(set(header)) != len(header):
         raise ValueError("Samplesheet contains duplicate column names")
-    if long_reads and ("fastq_1" in header or "fastq_2" in header):
+    bam_input = "bam" in header
+    if bam_input and ("fastq_1" in header or "fastq_2" in header):
+        raise ValueError("Samplesheet lists both FASTQs and BAMs; use fastq_1/fastq_2 or bam, not both")
+    if long_reads and not bam_input:
         raise ValueError(
             "With --long_reads the samplesheet lists aligned BAMs in a bam column, not fastq_1/fastq_2"
         )
-    if not long_reads and "bam" in header:
-        raise ValueError("The bam column needs --long_reads")
-    required_columns = LONG_READ_REQUIRED if long_reads else SHORT_READ_REQUIRED
+    required_columns = BAM_REQUIRED if bam_input else FASTQ_REQUIRED
     allowed = required_columns + OPTIONAL_COLUMNS
     unknown = sorted(set(header) - set(allowed))
     if unknown:
@@ -95,13 +99,14 @@ def check_header(header: list[str], long_reads: bool) -> None:
     missing = [name for name in required_columns if name not in header]
     if missing:
         raise ValueError(f"Samplesheet is missing required column(s): {', '.join(missing)}")
+    return bam_input
 
 
 def check_row(
     line_number: int,
     row: dict[str, str],
     analysis: str,
-    long_reads: bool,
+    bam_input: bool,
     samples: dict[str, dict],
     file_owners: dict[str, str],
     problems: list[str],
@@ -124,13 +129,13 @@ def check_row(
     vcf, index = check_vcf(row.get("variant_vcf", ""), problem)
     metadata = {"control": control, "variant_vcf": vcf, "variant_index": index}
     owner = f"line {line_number} ({sample})"
-    if long_reads:
-        add_long_read_row(row, sample, metadata, owner, samples, file_owners, problem)
+    if bam_input:
+        add_bam_row(row, sample, metadata, owner, samples, file_owners, problem)
     else:
-        add_short_read_row(row, sample, metadata, analysis, owner, samples, file_owners, problem)
+        add_fastq_row(row, sample, metadata, analysis, owner, samples, file_owners, problem)
 
 
-def add_long_read_row(
+def add_bam_row(
     row: dict[str, str],
     sample: str,
     metadata: dict[str, str],
@@ -139,18 +144,18 @@ def add_long_read_row(
     file_owners: dict[str, str],
     problem,
 ) -> None:
-    """A long-read sample is one aligned BAM, so it has exactly one row."""
+    """A sample given as an aligned BAM has exactly one row."""
     if not row.get("bam"):
         problem("bam is blank")
         return
     bam, bam_index = check_bam(row["bam"], owner, file_owners, problem)
     if sample in samples:
-        problem(f"sample '{sample}' has more than one row; a long-read sample is one BAM")
+        problem(f"sample '{sample}' has more than one row; a sample given as a BAM has one")
         return
     samples[sample] = {"sample": sample, "bam": bam, "bam_index": bam_index, **metadata}
 
 
-def add_short_read_row(
+def add_fastq_row(
     row: dict[str, str],
     sample: str,
     metadata: dict[str, str],

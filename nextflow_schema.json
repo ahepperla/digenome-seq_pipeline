@@ -16,11 +16,11 @@
           "format": "file-path",
           "exists": true,
           "pattern": "^\\S+\\.csv$",
-          "description": "Samplesheet CSV: sample, fastq_1, fastq_2, and optional control and variant_vcf; with --long_reads, sample, bam, and optional control and variant_vcf."
+          "description": "Samplesheet CSV: sample, fastq_1, fastq_2, and optional control and variant_vcf; or, for aligned BAMs (required with --long_reads), sample, bam, and optional control and variant_vcf."
         },
         "genome": {
           "type": "string",
-          "description": "Name or alias of a genome in params.genomes to align against, in any case (for example GRCh38 or hg38). Required unless --long_reads."
+          "description": "Name or alias of a genome in params.genomes to align against, in any case (for example GRCh38 or hg38). Required for a samplesheet of FASTQs."
         },
         "analysis": {
           "type": "string",
@@ -63,7 +63,7 @@
         "keep_multimappers": {
           "type": "boolean",
           "default": false,
-          "description": "Run bwa-mem2 with -a, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement. With --long_reads only the MAPQ changes apply."
+          "description": "Run bwa-mem2 with -a, count MAPQ-0 primary alignments (both minimum MAPQs and the support mean-MAPQ filter become 0), and turn off fastp low-complexity filtering. Each read still counts once, at its primary placement. With a samplesheet of BAMs only the MAPQ changes apply."
         },
         "long_reads": {
           "type": "boolean",

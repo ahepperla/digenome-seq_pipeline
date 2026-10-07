@@ -40,8 +40,17 @@ def config_parameters() -> dict[str, str]:
     return dict(re.findall(r"^    ([a-z][a-z0-9_]*) = (.+)$", block, flags=re.MULTILINE))
 
 
+def unique_keys(pairs: list[tuple[str, object]]) -> dict:
+    """A JSON object hook that rejects duplicate keys, as nf-schema does."""
+    keys = [key for key, _value in pairs]
+    duplicates = sorted({key for key in keys if keys.count(key) > 1})
+    if duplicates:
+        raise ValueError(f"duplicate JSON keys: {', '.join(duplicates)}")
+    return dict(pairs)
+
+
 def schema_parameters() -> dict[str, dict]:
-    schema = json.loads((ROOT / "nextflow_schema.json").read_text())
+    schema = json.loads((ROOT / "nextflow_schema.json").read_text(), object_pairs_hook=unique_keys)
     return {
         name: definition
         for group in schema["$defs"].values()
@@ -181,10 +190,12 @@ class NextflowTests(unittest.TestCase):
 
     INPUT_MTIME = 1_000_000_000  # set on input BAMs, to show the run never writes them
 
-    SHORT_READ_PROCESSES = {
-        "SAMPLESHEET", "SHORT_READS:PREPARE_INDEX", "SHORT_READS:FASTP", "SHORT_READS:ALIGN",
+    FASTQ_PROCESSES = {
+        "SAMPLESHEET", "FROM_FASTQS:PREPARE_INDEX", "FROM_FASTQS:FASTP", "FROM_FASTQS:ALIGN",
         "CALL_CHUNK", "FINALIZE", "MULTIQC",
     }
+    BAM_PROCESSES = {"SAMPLESHEET", "FROM_BAMS:SORT_BAM", "CALL_CHUNK", "FINALIZE", "MULTIQC"}
+    ALIGNED_OUTPUTS = ("bam/", "fastp/", "qc/")
 
     def test_digenome_stub_run_publishes_every_output(self) -> None:
         samples = ["Treated", "Control", "Uncontrolled", "SingleEnd"]
@@ -192,10 +203,10 @@ class NextflowTests(unittest.TestCase):
         # SMOKE is an alias of the test profile's genome, in another case.
         out, info = self.stub_run("digenome", self.fastq_sheet, samples, ["--keep_multimappers", "--genome", "SMOKE"])
         self.assertEqual(self.published(out), self.expected_files("digenome", samples, called))
-        self.assertEqual(self.processes(out), self.SHORT_READ_PROCESSES)
+        self.assertEqual(self.processes(out), self.FASTQ_PROCESSES)
         self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
         # The index and the run record use the genome's name, not the alias.
-        self.assertIn("SHORT_READS:PREPARE_INDEX (tiny)", (out / "pipeline_info" / "trace.txt").read_text())
+        self.assertIn("FROM_FASTQS:PREPARE_INDEX (tiny)", (out / "pipeline_info" / "trace.txt").read_text())
         self.assertEqual(info["genome"], "tiny")
         # --keep_multimappers lowers every MAPQ threshold together.
         settings = info["caller_settings"]
@@ -209,7 +220,7 @@ class NextflowTests(unittest.TestCase):
         called = ["Treated", "Uncontrolled"]
         out, info = self.stub_run("ndigenome", self.fastq_sheet, samples, [])
         self.assertEqual(self.published(out), self.expected_files("ndigenome", samples, called))
-        self.assertEqual(self.processes(out), self.SHORT_READ_PROCESSES)
+        self.assertEqual(self.processes(out), self.FASTQ_PROCESSES)
         self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
         self.assertEqual((info["genome"], Path(info["fasta"]).name), ("tiny", "tiny.fa"))
         settings = info["caller_settings"]
@@ -220,18 +231,14 @@ class NextflowTests(unittest.TestCase):
         called = ["Treated", "Uncontrolled"]
         # No --genome: long reads need no reference.
         out, info = self.stub_run("ndigenome", self.bam_sheet, samples, ["--long_reads", "-params-file", "no_genome.json"])
-        aligned_outputs = ("bam/", "fastp/", "qc/")
         self.assertEqual(
             self.published(out),
-            {path for path in self.expected_files("ndigenome", samples, called) if not path.startswith(aligned_outputs)},
+            {path for path in self.expected_files("ndigenome", samples, called) if not path.startswith(self.ALIGNED_OUTPUTS)},
         )
-        self.assertEqual(
-            self.processes(out),
-            {"SAMPLESHEET", "LONG_READS:SORT_BAM", "CALL_CHUNK", "FINALIZE", "MULTIQC"},
-        )
+        self.assertEqual(self.processes(out), self.BAM_PROCESSES)
         # Only the unsorted BAM is sorted, and the input file is left untouched.
         trace = (out / "pipeline_info" / "trace.txt").read_text()
-        self.assertEqual(re.findall(r"LONG_READS:SORT_BAM \((\w+)\)", trace), ["Uncontrolled"])
+        self.assertEqual(re.findall(r"FROM_BAMS:SORT_BAM \((\w+)\)", trace), ["Uncontrolled"])
         unsorted = out.parent / "Uncontrolled" / "Uncontrolled.sorted.bam"
         self.assertEqual(unsorted.stat().st_mtime, self.INPUT_MTIME)
         self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
@@ -243,9 +250,39 @@ class NextflowTests(unittest.TestCase):
             (True, 1.0, 1.0),
         )
 
+    def test_short_read_bam_stub_run_skips_alignment(self) -> None:
+        samples = ["Treated", "Control", "Uncontrolled"]
+        called = ["Treated", "Uncontrolled"]
+        out, info = self.stub_run("digenome", self.bam_sheet, samples, ["-params-file", "no_genome.json"])
+        self.assertEqual(
+            self.published(out),
+            {path for path in self.expected_files("digenome", samples, called) if not path.startswith(self.ALIGNED_OUTPUTS)},
+        )
+        self.assertEqual(self.processes(out), self.BAM_PROCESSES)
+        self.assertEqual(self.chunk_tasks(out), Counter({sample: 3 for sample in called}))
+        self.assertEqual((info["genome"], info["fasta"]), (None, None))
+        # Short-read rules: the long-read limits stay at their defaults.
+        settings = info["caller_settings"]
+        self.assertEqual(
+            (settings["long_reads"], settings["cleavage_max_softclip_fraction"], settings["cleavage_max_indel_fraction"]),
+            (False, 0.2, 0.2),
+        )
+
+    def test_long_reads_need_a_bam_samplesheet(self) -> None:
+        result = self.launch("digenome", self.fastq_sheet, ["Treated", "Control"], ["--long_reads"])[1]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--long_reads needs a samplesheet of aligned BAMs", result.stdout + result.stderr)
+
     def stub_run(self, analysis: str, write_sheet, samples: list[str], options: list[str]) -> tuple[Path, dict]:
         """Run the stub workflow on empty inputs from `write_sheet`; Treated
         uses Control. Returns the output directory and analysis_parameters.json."""
+        out, result = self.launch(analysis, write_sheet, samples, options)
+        self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-3000:])
+        return out, json.loads((out / "pipeline_info" / "analysis_parameters.json").read_text())
+
+    def launch(self, analysis: str, write_sheet, samples: list[str], options: list[str]):
+        """Write the inputs and start a stub run; returns the output directory
+        and the finished process."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         directory = Path(temporary.name)
@@ -268,8 +305,7 @@ class NextflowTests(unittest.TestCase):
             ],
             cwd=directory, env=environment, capture_output=True, text=True, check=False,
         )
-        self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-3000:])
-        return out, json.loads((out / "pipeline_info" / "analysis_parameters.json").read_text())
+        return out, result
 
     @staticmethod
     def fastq_sheet(directory: Path, samples: list[str]) -> str:

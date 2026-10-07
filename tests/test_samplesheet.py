@@ -549,17 +549,30 @@ class SamplesheetTests(unittest.TestCase):
         ):
             validate_samplesheet(input_csv, "digenome", long_reads=True)
 
-    def test_short_read_rejects_bam_column_without_long_reads(self) -> None:
-        """Test that bam column is rejected without --long_reads."""
+    def test_short_read_bam_sheet_accepted(self) -> None:
         bam = self.bam("sample.bam")
-
         input_csv = self.tmp / "input.csv"
-        input_csv.write_text(
-            "sample,bam\n"
-            f"Sample,{bam}\n"
-        )
-        with self.assertRaisesRegex(ValueError, "The bam column needs --long_reads"):
-            validate_samplesheet(input_csv, "digenome", long_reads=False)
+        input_csv.write_text(f"sample,bam\nSample,{bam}\n")
+        for analysis in ("digenome", "ndigenome"):
+            with self.subTest(analysis=analysis):
+                self.assertEqual(
+                    validate_samplesheet(input_csv, analysis),
+                    [{
+                        "sample": "Sample",
+                        "bam": str(bam.resolve()),
+                        "bam_index": f"{bam.resolve()}.bai",
+                        "control": "",
+                        "variant_vcf": "",
+                        "variant_index": "",
+                        "is_control": False,
+                    }],
+                )
+
+    def test_fastq_and_bam_columns_together_rejected(self) -> None:
+        input_csv = self.tmp / "input.csv"
+        input_csv.write_text("sample,fastq_1,fastq_2,bam\n")
+        with self.assertRaisesRegex(ValueError, "lists both FASTQs and BAMs"):
+            validate_samplesheet(input_csv, "digenome")
 
     def test_long_read_shared_control_allowed(self) -> None:
         """Test that one control can be shared by multiple treated samples."""
