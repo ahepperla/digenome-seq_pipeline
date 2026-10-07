@@ -18,6 +18,8 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import (
     make_read,
+    reverse_read_ending_at,
+    reverse_background,
     forward_background,
     write_bam,
     write_vcf,
@@ -26,7 +28,8 @@ from helpers import (
     CHUNK_SETTINGS,
 )
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "golden"))
+from scenarios import multi_contig  # noqa: E402
 from cleavage.call import call_chunk
 from cleavage.finalize import finalize
 from cleavage.stats import benjamini_hochberg
@@ -85,9 +88,6 @@ class FinalizeTests(unittest.TestCase):
         """The chunk count changes runtime, never results (AGENTS.md). Uses the
         multi-contig golden scenario: controls, a known indel, a blacklisted
         site, and chr10 before chr3 in the header."""
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "golden"))
-        from scenarios import multi_contig
-
         scenario = multi_contig()
         inputs = scenario.write_inputs(self.tmp / "inputs")
         for analysis, expected_rows in (("digenome", 3), ("ndigenome", 7)):
@@ -244,9 +244,6 @@ class FinalizeTests(unittest.TestCase):
     def test_chunk_files_may_arrive_in_any_order(self) -> None:
         """Nextflow collects chunks in completion order; the finalizer must
         pair each summary with its own records regardless."""
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "golden"))
-        from scenarios import multi_contig
-
         scenario = multi_contig()
         inputs = scenario.write_inputs(self.tmp / "inputs")
         for analysis in ("digenome", "ndigenome"):
@@ -275,6 +272,31 @@ class FinalizeTests(unittest.TestCase):
                 self.assertEqual(
                     Path(f"{in_order}.{analysis}.{suffix}").read_bytes(),
                     Path(f"{reversed_order}.{analysis}.{suffix}").read_bytes(),
+                )
+
+    def test_partner_found_across_a_boundary_at_overhang_distance(self) -> None:
+        """Chunks look |overhang| + pair_window past their ranges for partners.
+        With window 0 the partner sits exactly |overhang| bases away, across
+        the 2-chunk boundary at 1000, for a positive and a negative overhang."""
+        for overhang, forward, reverse in ((4, 1002, 998), (-4, 998, 1002)):
+            with self.subTest(overhang=overhang):
+                reads = [make_read(f"fwd_{i}", forward, mapq=0) for i in range(8)]
+                reads += [reverse_read_ending_at(f"rev_{i}", reverse, mapq=0) for i in range(8)]
+                reads += forward_background("fbg", forward, 12, mapq=0)
+                reads += reverse_background("rbg", reverse, 12, mapq=0)
+                directory = self.tmp / f"overhang_{overhang}"
+                directory.mkdir()
+                bam = write_bam(directory / "treated.bam", [("chr1", 2000)], reads)
+                settings = make_settings(
+                    "digenome", base=CHUNK_SETTINGS, digenome_overhang=overhang, digenome_pair_window=0
+                )
+                inputs = {"bam": bam, "control_bam": None, "vcf": None, "blacklist": None}
+                serial, serial_qc = run_caller(settings, inputs, directory / "serial", chunks=1)
+                chunked, chunked_qc = run_caller(settings, inputs, directory / "chunked", chunks=2)
+                self.assertEqual((serial_qc["rows"], chunked_qc["rows"]), (1, 1))
+                self.assertEqual(
+                    Path(f"{chunked}.digenome.all.tsv").read_bytes(),
+                    Path(f"{serial}.digenome.all.tsv").read_bytes(),
                 )
 
     def test_finalizer_missing_chunks(self) -> None:

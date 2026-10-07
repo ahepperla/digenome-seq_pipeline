@@ -293,6 +293,31 @@ class DigenomeTests(unittest.TestCase):
         self.assertEqual(rows[0]["tier"], "artifact")
         self.assertEqual(rows[0]["filter_reasons"], "HIGH_CONTROL_FRACTION;LOW_CONTROL_FOLD;CONTROL_Q_FAIL")
 
+    def test_shallow_control_marks_pair_insufficient(self) -> None:
+        """A control with no reads at the pair: blank fold, p, and q; filtered
+        as an artifact; both control scores still measured."""
+        reads = [make_read(f"fwd_{i}", 500) for i in range(8)]
+        reads += [reverse_read_ending_at(f"rev_{i}", 500) for i in range(8)]
+        control_reads = [make_read(f"elsewhere_{i}", 1500) for i in range(10)]
+        bam = write_bam(self.tmp / "treated.bam", [("chr1", 2000)], reads)
+        control = write_bam(self.tmp / "control.bam", [("chr1", 2000)], control_reads)
+        prefix, _ = run_caller(
+            make_settings("digenome"),
+            {"bam": bam, "control_bam": control, "vcf": None, "blacklist": None},
+            self.tmp / "out",
+            chunks=1,
+        )
+        row = self.read_rows(prefix)[0]
+        self.assertEqual(row["control_status"], "INSUFFICIENT_CONTROL_COVERAGE")
+        self.assertEqual(row["control_combined_depth"], "0")
+        self.assertEqual(
+            (row["control_fold_enrichment"], row["control_fisher_p"], row["control_fisher_q"]),
+            ("", "", ""),
+        )
+        self.assertEqual((row["control_digenome_pair_score"], row["control_rgen_digenome_score"]), ("0", "0"))
+        self.assertEqual(row["tier"], "artifact")
+        self.assertEqual(row["filter_reasons"], "INSUFFICIENT_CONTROL_COVERAGE")
+
     def test_indel_and_vcf_artifacts_are_shared(self) -> None:
         """Both endpoints share indel and known-indel artifact reasons."""
         # Forward reads with insertion at position 805

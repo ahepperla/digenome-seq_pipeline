@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import digenome, ndigenome
 from .bam import check_layout, mapped_contigs, open_bam
+from .output import record_key
 from .regions import load_blacklist, plan_chunks, plan_to_json
 from .settings import CallerSettings
 from .vcf import open_vcf
@@ -87,8 +88,3 @@ def call_chunk(
     }
     Path(f"{out_prefix}.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
-
-
-def record_key(record: dict, contig_order: dict[str, int]) -> tuple[int, int, str]:
-    """Output order: BAM header contig order, then position, then strand."""
-    return contig_order[record["contig"]], record["position_0based"], record["strand"]

@@ -14,6 +14,7 @@ workflow {
     validateParameters()
     def fasta = genomeFasta()
     def settings = callerSettings()
+    def settings_json = groovy.json.JsonOutput.toJson(settings)
     writeRunInfo(fasta, settings)
 
     def code = files("${projectDir}/bin/cleavage/*.py")
@@ -58,8 +59,8 @@ workflow {
     def chunk_jobs = controlled.mix(uncontrolled).combine(channel.of(0..<params.cleavage_chunks))
 
     def blacklist = params.genome_blacklist ? file(params.genome_blacklist) : []
-    CALL_CHUNK(chunk_jobs, blacklist, code, groovy.json.JsonOutput.toJson(settings))
-    FINALIZE(CALL_CHUNK.out.groupTuple(size: params.cleavage_chunks), code, groovy.json.JsonOutput.toJson(settings))
+    CALL_CHUNK(chunk_jobs, blacklist, code, settings_json)
+    FINALIZE(CALL_CHUNK.out.groupTuple(size: params.cleavage_chunks), code, settings_json)
 
     MULTIQC(
         FASTP.out.qc
@@ -298,8 +299,8 @@ process CALL_CHUNK {
         --chunks ${params.cleavage_chunks} \\
         --out-prefix ${prefix} \\
         ${control} \\
-        ${vcf ? "--vcf ${vcf}" : ''} \\
-        ${blacklist ? "--blacklist ${blacklist}" : ''}
+        ${vcf ? "--vcf ${quote(vcf)}" : ''} \\
+        ${blacklist ? "--blacklist ${quote(blacklist)}" : ''}
     """
 
     stub:

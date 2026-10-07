@@ -19,11 +19,14 @@ import sys
 import tempfile
 import unittest
 from collections import Counter
+from dataclasses import fields
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests" / "fixtures"))
+sys.path.insert(0, str(ROOT / "bin"))
 import build_smoke_fixture  # noqa: E402
+from cleavage.settings import CallerSettings  # noqa: E402
 
 NEXTFLOW = shutil.which("nextflow")
 
@@ -77,6 +80,14 @@ class ParameterTests(unittest.TestCase):
         for name, definition in schema_parameters().items():
             with self.subTest(parameter=name):
                 self.assertTrue(definition["description"].strip())
+
+
+class CallerSettingsTests(unittest.TestCase):
+    def test_main_nf_builds_exactly_the_caller_settings(self) -> None:
+        """callerSettings() in main.nf and CallerSettings must list the same names."""
+        block = (ROOT / "main.nf").read_text().split("def callerSettings()", 1)[1].split("\n}\n", 1)[0]
+        keys = re.findall(r"^        ([a-z_]+):", block, flags=re.MULTILINE)
+        self.assertEqual(sorted(keys), sorted(field.name for field in fields(CallerSettings)))
 
 
 class ContainerTests(unittest.TestCase):

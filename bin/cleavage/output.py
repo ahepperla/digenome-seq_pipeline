@@ -67,6 +67,11 @@ NDIGENOME_COLUMNS = [
 TIERS = ["high_confidence", "manual_review", "artifact"]
 
 
+def record_key(record: dict, contig_order: dict[str, int]) -> tuple[int, int, str]:
+    """Output order: BAM header contig order, then position, then strand."""
+    return contig_order[record["contig"]], record["position_0based"], record["strand"]
+
+
 def one_based(position: int | None) -> int | None:
     return None if position is None else position + 1
 

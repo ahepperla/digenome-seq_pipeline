@@ -97,8 +97,15 @@ def has_partner(position: int, strand: str, forward: list[int], reverse: list[in
 
 
 def endpoint_record(
-    bam, control_bam, vcf, settings: CallerSettings, blacklist,
-    contig: str, position: int, strand: str, rgen_caches: tuple[dict, dict],
+    bam: pysam.AlignmentFile,
+    control_bam: pysam.AlignmentFile | None,
+    vcf: pysam.VariantFile | None,
+    settings: CallerSettings,
+    blacklist: Blacklist | None,
+    contig: str,
+    position: int,
+    strand: str,
+    rgen_caches: tuple[dict, dict],
 ) -> dict:
     window, min_mapq = settings.cleavage_artifact_window, settings.digenome_min_mapq
     record = {

@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import fields
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -26,6 +27,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from test_golden import expected_bed, expected_rows  # noqa: E402  (also puts bin/ on sys.path)
 
 import pysam  # noqa: E402
+from cleavage.settings import CallerSettings  # noqa: E402
 
 TIERS = ["all", "high_confidence", "manual_review", "artifact"]
 # ru_maxrss is in KiB on Linux and in bytes on macOS.
@@ -62,24 +64,19 @@ def run(label: str, command: list[str], cwd: Path, timings: list[dict], env: dic
 
 
 def default_settings(analysis: str, keep_multimappers: bool) -> dict:
-    """The pipeline's defaults, with the --keep_multimappers overrides."""
-    return {
-        "analysis": analysis,
-        "keep_multimappers": keep_multimappers,
-        "digenome_overhang": 0, "digenome_pair_window": 2,
-        "digenome_min_mapq": 0 if keep_multimappers else 1,
-        "digenome_forward_cutoff": 5, "digenome_reverse_cutoff": 5, "digenome_depth_cutoff": 10,
-        "digenome_fraction_cutoff": 0.2, "digenome_pair_score_cutoff": 2.5,
-        "ndigenome_min_count": 10, "ndigenome_min_fraction": 0.2,
-        "ndigenome_min_mapq": 0 if keep_multimappers else 1,
-        "ndigenome_opposite_window": 5, "ndigenome_ambiguous_min_count": 3,
-        "ndigenome_ambiguous_min_fraction": 0.05,
-        "cleavage_artifact_window": 10, "cleavage_max_softclip_fraction": 0.2,
-        "cleavage_max_indel_fraction": 0.2,
-        "cleavage_min_support_mean_mapq": 0 if keep_multimappers else 10,
-        "cleavage_control_min_depth": 1, "cleavage_control_max_fraction": 0.05,
-        "cleavage_control_min_fold": 5.0, "cleavage_control_max_q": 0.05,
+    """The pipeline's defaults from nextflow_schema.json, with the same
+    --keep_multimappers overrides as callerSettings() in main.nf."""
+    schema = json.loads((ROOT / "nextflow_schema.json").read_text())
+    defaults = {
+        name: definition.get("default")
+        for group in schema["$defs"].values()
+        for name, definition in group["properties"].items()
     }
+    settings = {field.name: defaults.get(field.name) for field in fields(CallerSettings)}
+    settings.update(analysis=analysis, keep_multimappers=keep_multimappers)
+    if keep_multimappers:
+        settings.update(digenome_min_mapq=0, ndigenome_min_mapq=0, cleavage_min_support_mean_mapq=0)
+    return settings
 
 
 def run_legacy(args, directory: Path, timings: list[dict]) -> str:

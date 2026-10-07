@@ -17,11 +17,10 @@ import json
 import math
 import tempfile
 from pathlib import Path
-from typing import Iterator
+from typing import IO, Iterator
 
 from . import digenome
-from .call import record_key
-from .output import apply_filters, write_outputs
+from .output import apply_filters, record_key, write_outputs
 from .regions import OwnedInterval, check_plan, plan_from_json, write_plan
 from .settings import CallerSettings
 from .stats import benjamini_hochberg
@@ -130,7 +129,7 @@ def unique(records: Iterator[dict], contig_order: dict[str, int]) -> Iterator[di
         yield record
 
 
-def stage_rows(rows: Iterator[dict], staged) -> list[float]:
+def stage_rows(rows: Iterator[dict], staged: IO[str]) -> list[float]:
     """Write rows to the staging file; return their control p-values in order."""
     p_values = []
     for row in rows:
@@ -143,7 +142,13 @@ def stage_rows(rows: Iterator[dict], staged) -> list[float]:
     return p_values
 
 
-def stage_pairs(records: Iterator[dict], settings, sample, control_sample, staged) -> tuple[list[float], int]:
+def stage_pairs(
+    records: Iterator[dict],
+    settings: CallerSettings,
+    sample: str,
+    control_sample: str,
+    staged: IO[str],
+) -> tuple[list[float], int]:
     """Pair each contig's endpoint records and stage the resulting rows."""
     p_values: list[float] = []
     candidates = 0
@@ -154,7 +159,7 @@ def stage_pairs(records: Iterator[dict], settings, sample, control_sample, stage
     return p_values, candidates
 
 
-def filtered_rows(staged, q_values: Iterator[float], settings: CallerSettings) -> Iterator[dict]:
+def filtered_rows(staged: IO[str], q_values: Iterator[float], settings: CallerSettings) -> Iterator[dict]:
     """Read staged rows back, attach the sample-wide q-values, and filter."""
     for line in staged:
         row = json.loads(line)

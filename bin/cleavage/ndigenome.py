@@ -54,8 +54,16 @@ def call_chunk(
 
 
 def call_endpoint(
-    bam, control_bam, vcf, settings: CallerSettings, blacklist,
-    contig: str, position: int, strand: str, sample: str, control_sample: str,
+    bam: pysam.AlignmentFile,
+    control_bam: pysam.AlignmentFile | None,
+    vcf: pysam.VariantFile | None,
+    settings: CallerSettings,
+    blacklist: Blacklist | None,
+    contig: str,
+    position: int,
+    strand: str,
+    sample: str,
+    control_sample: str,
 ) -> dict | None:
     window = settings.cleavage_artifact_window
     metrics = measure_site(bam, contig, position, strand, window, settings.ndigenome_min_mapq)
