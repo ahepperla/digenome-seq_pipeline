@@ -58,9 +58,10 @@ def schema_parameters() -> dict[str, dict]:
     }
 
 
-def documented_parameters() -> list[str]:
-    text = (ROOT / "docs" / "parameters.md").read_text()
-    return re.findall(r"^\| `--([a-z][a-z0-9_]*)` \|", text, flags=re.MULTILINE)
+def documented_parameters() -> list[tuple[str, str]]:
+    """(name, default cell) for each row of the README's parameter tables."""
+    text = (ROOT / "README.md").read_text()
+    return re.findall(r"^\| `--([a-z][a-z0-9_]*)` \| ([^|]*) \|", text, flags=re.MULTILINE)
 
 
 def config_literal(text: str):
@@ -74,10 +75,22 @@ def config_literal(text: str):
 class ParameterTests(unittest.TestCase):
     def test_config_schema_and_docs_list_the_same_parameters(self) -> None:
         configured = set(config_parameters()) - {"genomes"}
-        documented = documented_parameters()
+        documented = [name for name, _default in documented_parameters()]
         self.assertEqual(set(schema_parameters()), configured)
         self.assertEqual(set(documented), configured)
         self.assertEqual(len(documented), len(set(documented)))
+
+    def test_documented_defaults_match_config(self) -> None:
+        """Numbers and booleans in the README's Default column; words such as
+        "required" or "none" are not checked."""
+        config = config_parameters()
+        for name, cell in documented_parameters():
+            try:
+                documented = json.loads(cell.strip().strip("`"))
+            except ValueError:
+                continue
+            with self.subTest(parameter=name):
+                self.assertEqual(documented, config_literal(config[name]))
 
     def test_schema_defaults_match_config(self) -> None:
         schema = schema_parameters()

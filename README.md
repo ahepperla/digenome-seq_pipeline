@@ -4,7 +4,7 @@ Nextflow pipeline that calls nuclease cleavage sites from whole-genome
 sequencing of digested genomic DNA: Illumina reads, as FASTQs or aligned BAMs,
 or aligned ONT or PacBio long reads with `--long_reads`.
 
-| `--analysis` | Calls | Reads |
+| Mode (`--analysis`) | Calls | Reads |
 | --- | --- | --- |
 | `digenome` (default) | forward and reverse endpoints paired into double-strand breaks | paired-end, single-end, or long reads |
 | `ndigenome` | isolated strand endpoints: single-strand breaks or nicks | paired-end or long reads |
@@ -14,8 +14,8 @@ alignment and duplicate marking → cleavage calling in parallel coordinate
 chunks → per-sample finalize (pairing, sample-wide statistics, filters) →
 MultiQC. Aligned BAMs skip trimming and alignment, are sorted if they need it,
 and start at cleavage calling. How calls are made is in
-[docs/cleavage_algorithm.md](docs/cleavage_algorithm.md); every parameter is in
-[docs/parameters.md](docs/parameters.md).
+[docs/cleavage_algorithm.md](docs/cleavage_algorithm.md); every parameter is
+under [Parameters](#parameters).
 
 ## Requirements
 
@@ -143,39 +143,156 @@ params.genomes = [MyGenome: [fasta: '/path/to/MyGenome.fa', aliases: ['mine']]]
 
 then run with `-c custom.config --genome MyGenome` (or `--genome mine`).
 
-## Key options
+## Parameters
 
-| Option | Default | Effect |
+Pipeline parameters take two hyphens (`--analysis ndigenome`); Nextflow's own
+options take one (`-profile`). A boolean is turned on by its name alone
+(`--long_reads`) or set with `true` or `false`. Unknown parameters and invalid
+values stop the run at launch, and `--help` lists every parameter. The math
+behind the cutoffs is in [docs/cleavage_algorithm.md](docs/cleavage_algorithm.md).
+
+### Inputs and outputs
+
+| Parameter | Default | Description |
 | --- | --- | --- |
-| `--long_reads` | off | Call aligned long-read BAMs (see [Long reads](#long-reads)) |
-| `--keep_multimappers` | off | Count MAPQ-0 primary alignments for repetitive regions (see below) |
-| `--cleavage_chunks` | 8 | Chunks per sample, each a one-CPU task; changes runtime, never results |
-| `--genome_blacklist` | none | BED/BED.gz of regions to skip (see below) |
-| `--publish_trimmed_fastqs` | off | Also publish the trimmed FASTQs |
+| `--input` | required | Samplesheet CSV of FASTQs or aligned BAMs; see [Samplesheet](#samplesheet). |
+| `--genome` | none | Genome to align FASTQs to: a configured name or alias, in any case (`GRCh38` or `hg38`). Required for a FASTQ samplesheet; not used for BAMs. |
+| `--analysis` | `digenome` | `digenome` pairs forward and reverse endpoints into double-strand breaks; `ndigenome` calls isolated strand endpoints (single-strand breaks, nicks). One mode applies to every sample. |
+| `--outdir` | `results` | Where results are published. Use a separate one for each run. |
+| `--genome_blacklist` | none | BED or BED.gz of regions to skip, in the BAMs' coordinates and contig names (see [Blacklist](#blacklist)). |
+| `--ref_cache` | `reference_cache/` in the checkout | Shared bwa-mem2 index cache (see [Reference cache](#reference-cache)). Point it outside the checkout so a fresh clone reuses the index. |
+| `--publish_trimmed_fastqs` | `false` | Also publish the fastp-trimmed FASTQs. |
 
-**Multimappers.** `--keep_multimappers` runs bwa-mem2 with `-a`, lets MAPQ-0
-primary alignments count (both minimum MAPQs and the support mean-MAPQ filter
-become 0), and turns off fastp's low-complexity filter. Each read still counts
-once, at BWA's primary placement; secondary and supplementary alignments stay
+### Run options
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `--long_reads` | `false` | Count both aligned ends of long ONT or PacBio reads, given as aligned BAMs (see [Long reads](#long-reads)). Also sets the soft-clip and indel limits to 1.0. |
+| `--keep_multimappers` | `false` | Let MAPQ-0 primary alignments count, for repetitive regions (see [Multimappers](#multimappers)). |
+| `--cleavage_chunks` | `8` | Coordinate chunks per sample, each called by a one-CPU task. Changes runtime, never results. |
+
+### Trimming (FASTQ input only)
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `--fastp_qualified_quality_phred` | `20` | Minimum Phred quality for a base to count as qualified. |
+| `--fastp_length_required` | `30` | Drop reads shorter than this after trimming. |
+| `--fastp_low_complexity_filter` | `true` | Drop low-complexity reads in Digenome mode. Always off for nDigenome and with `--keep_multimappers`. |
+| `--fastp_complexity_threshold` | `30` | Complexity threshold, in percent, for that filter. |
+| `--fastp_extra_args` | empty | Extra arguments appended to the fastp command. |
+
+Adapter detection is on for paired-end reads, and poly-G and poly-X trimming
+for all reads.
+
+### Digenome calling
+
+A forward endpoint `f` and a reverse endpoint `r` can pair when
+`|r - (f - overhang)| <= pair_window`. Each cutoff is strict: a value must be
+greater than it, so a count cutoff of 5 needs at least 6 reads. Endpoints with
+fewer reads than that are never reported.
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `--digenome_overhang` | `0` | Expected offset between the forward and reverse endpoints of one cut; the reverse endpoint is expected at `f - overhang`. |
+| `--digenome_pair_window` | `2` | How many bases a reverse endpoint may sit from its expected position. |
+| `--digenome_min_mapq` | `1` | Minimum MAPQ of counted reads (at least this). 0 with `--keep_multimappers`. |
+| `--digenome_forward_cutoff` | `5` | Reads ending at the forward endpoint must be more than this. |
+| `--digenome_reverse_cutoff` | `5` | Reads ending at the reverse endpoint must be more than this. |
+| `--digenome_depth_cutoff` | `10` | Reads covering each endpoint must be more than this. |
+| `--digenome_fraction_cutoff` | `0.2` | Each endpoint's share of the reads covering it must be more than this. |
+| `--digenome_pair_score_cutoff` | `1.1` | `digenome_pair_score` (forward fraction × reverse fraction × the two counts summed ÷ 4) must be more than this. 1.1 is RGEN's cutoff of 2.5 on this score's scale; the RGEN-style score is reported for comparison and never filtered on. |
+
+### nDigenome calling
+
+Each threshold is inclusive: a value equal to it passes.
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `--ndigenome_min_count` | `10` | Reads ending at the endpoint must be at least this. |
+| `--ndigenome_min_fraction` | `0.2` | Those reads' share of the same-strand reads covering the endpoint must be at least this. |
+| `--ndigenome_min_mapq` | `1` | Minimum MAPQ of counted reads (at least this). 0 with `--keep_multimappers`. |
+| `--ndigenome_opposite_window` | `5` | Bases on each side searched for an endpoint on the opposite strand. |
+| `--ndigenome_ambiguous_min_count` | `3` | An opposite-strand endpoint with at least this many reads makes the call AMBIGUOUS. |
+| `--ndigenome_ambiguous_min_fraction` | `0.05` | An opposite-strand endpoint with at least this share of its depth makes the call AMBIGUOUS. |
+
+The strongest opposite-strand endpoint in the window sets the class:
+POSSIBLE_DSB if it reaches `--ndigenome_min_count` and
+`--ndigenome_min_fraction`, AMBIGUOUS if it reaches either ambiguous limit, and
+SSB otherwise. Only unfiltered SSB rows are high confidence.
+
+### Artifact and control filters
+
+These apply in both modes. Each failed check adds its reason to the row's
+`filter_reasons` and keeps the row out of the high-confidence calls.
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `--cleavage_artifact_window` | `10` | Bases on each side of an endpoint checked for MAPQ, mismatches, indels, clipping, and known indels. |
+| `--cleavage_max_softclip_fraction` | `0.2` | HIGH_5P_SOFTCLIP when at least this share of the supporting reads are clipped at the end that forms the endpoint (the 5′ end for short reads). 1.0 with `--long_reads`. |
+| `--cleavage_max_indel_fraction` | `0.2` | NEARBY_INDEL when at least this share of the reads in the window carry an insertion or deletion there. 1.0 with `--long_reads`. |
+| `--cleavage_min_support_mean_mapq` | `10` | LOW_SUPPORT_MAPQ when the supporting reads' mean MAPQ is below this. 0 with `--keep_multimappers`. |
+| `--cleavage_control_min_depth` | `1` | INSUFFICIENT_CONTROL_COVERAGE when fewer control reads than this cover the site. |
+| `--cleavage_control_max_fraction` | `0.05` | HIGH_CONTROL_FRACTION when the control's share of reads ending at the site is above this. |
+| `--cleavage_control_min_fold` | `5.0` | LOW_CONTROL_FOLD when the treated-over-control enrichment is below this. |
+| `--cleavage_control_max_q` | `0.05` | CONTROL_Q_FAIL when the Fisher test's q-value, corrected across the whole sample, is above this. |
+
+The four control filters apply only to samples that name a control.
+
+### Multimappers
+
+`--keep_multimappers` runs bwa-mem2 with `-a`, lets MAPQ-0 primary alignments
+count (both minimum MAPQs and the support mean-MAPQ filter become 0), and turns
+off fastp's low-complexity filter. Each read still counts once, at the
+aligner's primary placement; secondary and supplementary alignments stay
 diagnostic. Support can therefore be split across equivalent repeat copies.
 With a samplesheet of BAMs only the MAPQ changes apply, since the reads come
 aligned.
 
-**Blacklist.** `--genome_blacklist` takes 0-based half-open BED rows with the
-BAM's contig names; overlapping and adjacent rows are merged. Malformed rows,
-unknown contigs, out-of-range coordinates, or an empty file stop the run.
-Endpoints inside the blacklist are never called and never count as
-opposite-strand evidence. The QC JSON records the file name, SHA-256, merged
-interval count, and excluded bases. The pipeline never downloads or chooses a
-blacklist for you.
+### Blacklist
 
-**Controls and variants.** Controls are optional; rows without one are
-`UNCONTROLLED` and are not filtered for that. With a control, each call gets
-fold enrichment, a Fisher exact p-value, and a sample-wide
-Benjamini–Hochberg q-value; if control depth is below
+`--genome_blacklist` takes 0-based half-open BED rows with the BAMs' contig
+names; overlapping and adjacent rows are merged. Use a list made for the same
+genome build as the BAMs: a list for another build either stops the run or
+masks the wrong regions. Malformed rows, unknown contigs, out-of-range
+coordinates, or an empty file stop the run. Endpoints inside the blacklist are
+never called and never count as opposite-strand evidence. The QC JSON records
+the file name, SHA-256, merged interval count, and excluded bases. The
+pipeline never downloads or chooses a blacklist for you.
+
+### Controls and variants
+
+Controls are optional; rows without one are `UNCONTROLLED` and are not
+filtered for that. Thresholds such as `--ndigenome_min_count` apply to each
+treated sample on its own; a control is only compared at the same position.
+With a control, each call gets fold enrichment, a Fisher exact p-value, and a
+sample-wide Benjamini–Hochberg q-value; if control depth is below
 `--cleavage_control_min_depth` the row is `INSUFFICIENT_CONTROL_COVERAGE` and
 filtered. A VCF must declare every analyzed contig with the BAM's names and
 lengths; a mismatch such as `chr1` versus `1` stops the run.
+
+### Nextflow options
+
+| Option | Description |
+| --- | --- |
+| `-profile` | Execution setup: `longleaf`, `apptainer`, `slurm`, or `test` (see [Profiles and configuration](#profiles-and-configuration)). |
+| `-work-dir`, `-w` | Task work directory. Use a separate one for each run. |
+| `-resume` | Reuse finished tasks from the same work directory. |
+| `-c` | Add a configuration file, for custom genomes, resources, or images. |
+| `-params-file` | Read parameters from a YAML or JSON file. |
+
+The execution report, timeline, trace, and DAG are always written to
+`<outdir>/pipeline_info/`.
+
+### Removed in the 2026 rebuild
+
+- `--max_memory`, `--max_cpus`, `--max_time`: set `process.resourceLimits` in a
+  configuration file.
+- `--containers`, `--container_bind_paths`: set images in `conf/base.config`
+  and binds in a profile.
+- `--index_lock_timeout_seconds`, `--index_stale_lock_seconds`: fixed at 48
+  hours.
+- `--publish_concat_fastqs`: lanes are concatenated inside FASTP.
+- The samplesheet `lane` column: repeat the sample name on each lane's row.
 
 ## Outputs
 

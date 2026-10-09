@@ -9,7 +9,7 @@ Both modes share the read filters, local artifact metrics, matched controls,
 known-indel annotation, and output tiers described here. Short reads
 contribute their 5′ ends; long reads (`--long_reads`) contribute both ends
 (see [Long reads](#long-reads)). Every threshold is a pipeline parameter; see
-[parameters.md](parameters.md).
+[Parameters](../README.md#parameters) in the README.
 
 ## Reads that count
 
